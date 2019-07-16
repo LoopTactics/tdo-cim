@@ -2559,6 +2559,8 @@ public:
 
   inline schedule_node align_params(space space) const;
   inline schedule_node ancestor(int generation) const;
+  inline boolean band_get_permutable() const;
+  inline space band_get_space() const;
   inline boolean band_member_get_coincident(int pos) const;
   inline schedule_node band_member_set_coincident(int pos, int coincident) const;
   inline schedule_node band_set_ast_build_options(union_set options) const;
@@ -2617,6 +2619,7 @@ public:
   inline schedule_node reset_user() const;
   inline schedule_node root() const;
   inline schedule_node sequence_splice_child(int pos) const;
+  inline multi_union_pw_aff band_get_partial_schedule() const;
 };
 
 // declarations for isl::set
@@ -14076,6 +14079,11 @@ void schedule_node::dump() const {
   isl_schedule_node_dump(get());
 }
 
+space schedule_node::band_get_space() const
+{
+  auto res = isl_schedule_node_band_get_space(get());
+  return manage(res);
+}
 
 schedule_node schedule_node::align_params(space space) const
 {
@@ -14086,6 +14094,12 @@ schedule_node schedule_node::align_params(space space) const
 schedule_node schedule_node::ancestor(int generation) const
 {
   auto res = isl_schedule_node_ancestor(copy(), generation);
+  return manage(res);
+}
+
+boolean schedule_node::band_get_permutable() const
+{
+  auto res = isl_schedule_node_band_get_permutable(get());
   return manage(res);
 }
 
@@ -14442,6 +14456,12 @@ schedule_node schedule_node::root() const
 schedule_node schedule_node::sequence_splice_child(int pos) const
 {
   auto res = isl_schedule_node_sequence_splice_child(copy(), pos);
+  return manage(res);
+}
+
+multi_union_pw_aff schedule_node::band_get_partial_schedule() const
+{
+  auto res = isl_schedule_node_band_get_partial_schedule(get());
   return manage(res);
 }
 

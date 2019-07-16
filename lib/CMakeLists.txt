@@ -52,7 +52,9 @@ add_library(PollyCore OBJECT
   Support/ISLTools.cpp
   Support/DumpModulePass.cpp
   Support/VirtualInstruction.cpp
+  Transform/Access_patterns.cpp
   Transform/Canonicalization.cpp
+  Transform/Builders.cpp
   Transform/CodePreparation.cpp
   Transform/DeadCodeElimination.cpp
   Transform/ScheduleOptimizer.cpp
@@ -60,6 +62,7 @@ add_library(PollyCore OBJECT
   Transform/FlattenAlgo.cpp
   Transform/ForwardOpTree.cpp
   Transform/DeLICM.cpp
+  Transform/Matchers.cpp
   Transform/ZoneAlgo.cpp
   Transform/Simplify.cpp
   Transform/MaximalStaticExpansion.cpp
