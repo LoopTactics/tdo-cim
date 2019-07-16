@@ -15,5 +15,6 @@
 
 #cmakedefine CUDA_FOUND
 #cmakedefine GPU_CODEGEN
+#cmakedefine CIM_RUNTIME
 
 #endif

@@ -121,6 +121,15 @@ if (OpenCL_FOUND)
   INCLUDE_DIRECTORIES( ${OpenCL_INCLUDE_DIR} )
 endif(OpenCL_FOUND)
 
+# CIM  runtime support
+OPTION(POLLY_ENABLE_CIM_CODEGEN "Enable CIM code generation" OFF)
+set(CIM_RUNTIME FALSE)
+
+if (POLLY_ENABLE_CIM_CODEGEN)
+  set(CIM_RUNTIME TRUE)
+  message(STATUS "Enabling CIM Codegeneration")
+endif (POLLY_ENABLE_CIM_CODEGEN)
+
 option(POLLY_BUNDLED_ISL "Use the bundled version of libisl included in Polly" ON)
 if (NOT POLLY_BUNDLED_ISL)
   find_package(ISL MODULE REQUIRED)
