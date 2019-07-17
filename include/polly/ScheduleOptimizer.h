@@ -45,6 +45,37 @@ struct Dependences;
 class MemoryAccess;
 class Scop;
 
+/// Parameters for the matrix-matrix multiplication.
+struct MatMulInfoTyExtended {
+
+  MemoryAccess *A = nullptr;
+  MemoryAccess *B = nullptr;
+  MemoryAccess *ReadFromC = nullptr;
+  MemoryAccess *WriteToC = nullptr;
+
+  MemoryAccess *WriteToC_init = nullptr;
+  MemoryAccess *ReadFromC_init = nullptr;
+
+  bool isTransposeA = false;
+  bool isTransposeB = false;
+};
+
+template <typename T> class Payload {
+public:
+  int detected = 0;
+  int current = 0;
+  std::vector<T> patternTys;
+
+  void flush() {
+    detected = 0;
+    current = 0;
+    patternTys.clear();
+  }
+};
+
+// FIXME: static is ok?
+static Payload<MatMulInfoTyExtended> pGemm;
+
 /// Additional parameters of the schedule optimizer.
 ///
 /// Target Transform Info and the SCoP dependencies used by the schedule

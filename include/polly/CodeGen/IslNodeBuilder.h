@@ -456,6 +456,8 @@ private:
   /// track of the induction variable.
   /// See [Code generation of induction variables of loops outside Scops]
   Value *materializeNonScopLoopInductionVariable(const Loop *L);
+
+  void insertDummy();
 };
 
 #endif // POLLY_ISLNODEBUILDER_H

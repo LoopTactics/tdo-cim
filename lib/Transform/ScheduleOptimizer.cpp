@@ -81,6 +81,12 @@
 #include <string>
 #include <vector>
 
+#include "polly/Access.h"
+#include "polly/Access_patterns.h"
+#include "polly/Builders.h"
+#include "polly/Matchers.h"
+#include <regex>
+
 using namespace llvm;
 using namespace polly;
 
@@ -270,6 +276,16 @@ static cl::opt<bool> OptimizedScops(
     cl::desc("Polly - Dump polyhedral description of Scops optimized with "
              "the isl scheduling optimizer and the set of post-scheduling "
              "transformations is applied on the schedule tree"),
+    cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+
+static cl::opt<bool> MatcherOptLate(
+    "polly-enable-matchers-opt-late",
+    cl::desc("Performs optimizations based on pattern matching (after isl)."),
+    cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
+
+static cl::opt<bool> MatcherOptEarly(
+    "polly-enable-matchers-opt-early",
+    cl::desc("Performs optimizations based on pattern matching (before isl)."),
     cl::init(false), cl::ZeroOrMore, cl::cat(PollyCategory));
 
 STATISTIC(ScopsProcessed, "Number of scops processed");
@@ -1467,6 +1483,1103 @@ static void walkScheduleTreeForStatistics(isl::schedule Schedule, int Version) {
       &Version);
 }
 
+/// Walk the schedule tree and check if the tree
+/// has been annotated by loop tactics.
+///
+/// @param schedule: New schedule obtained from loop tactics.
+/// @param s: Annotation to look-up for.
+bool lookUpScheduleTree(isl::schedule schedule, std::string s) {
+
+  assert(schedule && "empty schedule!");
+  isl::schedule_node root = schedule.get_root();
+
+  struct payload {
+    bool isOptimized = false;
+    std::string name = "empty";
+  } p;
+
+  p.name = s;
+
+  isl_schedule_node_foreach_descendant_top_down(
+      root.get(),
+      [](__isl_keep isl_schedule_node *nodePtr, void *user) -> isl_bool {
+        payload *p = static_cast<payload *>(user);
+
+        isl::schedule_node node = isl::manage_copy(nodePtr);
+        if (isl_schedule_node_get_type(node.get()) == isl_schedule_node_mark) {
+          isl::id id = node.mark_get_id();
+          std::string idAsString = id.to_str();
+          idAsString = idAsString.substr(0, idAsString.find("@"));
+          if ((idAsString.compare(p->name) == 0)) {
+            p->isOptimized = true;
+          }
+        }
+        return isl_bool_true;
+      },
+      &p);
+
+  return p.isOptimized;
+}
+
+/// utility function for wrapPatternDFSPreorder
+///
+/// @param ctx
+/// @param marker: Marker to insert
+/// @param node: Root of the subtree to inspect.
+/// @param pattern: Pattern to look-up in the subtree.
+/// @param runOnMatch: callback after structural matching.
+template <typename T>
+isl::schedule_node wrapPattern(isl::ctx ctx, Payload<T> *payload,
+                               const std::string &marker,
+                               isl::schedule_node node,
+                               const matchers::ScheduleNodeMatcher &pattern,
+                               std::function<bool(void)> runOnMatch) {
+
+  if (matchers::ScheduleNodeMatcher::isMatching(pattern, node)) {
+    if (runOnMatch && runOnMatch()) {
+      node = node.insert_mark(isl::id::alloc(ctx, marker, payload));
+    }
+  }
+  return node;
+}
+
+/// utility function for wrapPatternDFSPreorder
+///
+/// @param ctx
+/// @param marker: Marker to insert
+/// @param node: Root of the subtree to inspect.
+/// @param pattern: Pattern to look-up in the subtree.
+template <typename T>
+isl::schedule_node wrapPattern(isl::ctx ctx, Payload<T> *payload,
+                               const std::string &marker,
+                               isl::schedule_node node,
+                               const matchers::ScheduleNodeMatcher &pattern) {
+  // LLVM_DEBUG(dbgs() << "node :" << node.to_str() << "\n");
+  if (matchers::ScheduleNodeMatcher::isMatching(pattern, node)) {
+    node = node.insert_mark(isl::id::alloc(ctx, marker, payload));
+    LLVM_DEBUG(dbgs() << "MATCHED!!!\n");
+  }
+  return node;
+}
+
+template <typename T>
+isl::schedule_node
+wrapPatternDFSPreorder(isl::ctx ctx, Payload<T> *payload,
+                       const std::string &marker, isl::schedule_node node,
+                       const matchers::ScheduleNodeMatcher &pattern,
+                       std::function<bool(void)> runOnMatch = nullptr) {
+  if (runOnMatch)
+    node = wrapPattern(ctx, payload, marker, node, pattern, runOnMatch);
+  else
+    node = wrapPattern(ctx, payload, marker, node, pattern);
+
+  // if ((isl_schedule_node_get_type(node.get()) == isl_schedule_node_mark))
+  //  return node;
+
+  for (int i = 0; i < node.n_children(); i++) {
+    node = wrapPatternDFSPreorder(ctx, payload, marker, node.child(i), pattern,
+                                  runOnMatch)
+               .parent();
+  }
+  return node;
+}
+
+/// utility function for replaceDFSPreorderRepeatedly
+///
+/// @param node: Current node where to start cutting.
+/// @param replacement: Subtree to be attached after @p node.
+///
+/// NOTE: This is not always possible. Cutting children
+/// in set or sequence is not allowed by ISL and as a consequence
+/// by Loop Tactics.
+isl::schedule_node rebuild(isl::schedule_node node,
+                           const builders::ScheduleNodeBuilder &replacement) {
+
+  node = node.cut();
+  node = replacement.insertAt(node);
+  return node;
+}
+
+/// utility function for replaceDFSPreorderRepeatedly.
+///
+/// @param node: Root of the subtree to inspect.
+/// @param pattern: Pattern to look-up in the subtree.
+/// @param replacement: Replacement to be applied in case
+/// of a match with @p pattern.
+isl::schedule_node
+replaceRepeatedly(isl::schedule_node node,
+                  const matchers::ScheduleNodeMatcher &pattern,
+                  const builders::ScheduleNodeBuilder &replacement) {
+
+  while (matchers::ScheduleNodeMatcher::isMatching(pattern, node)) {
+    node = rebuild(node, replacement);
+    // XXX: if we insert a single mark node, we end up in
+    // an infinate loop, since they subtree under the mark will always
+    // match the matcher. Escape this skipping the mark node and the
+    // root node of the matcher.
+    if (isl_schedule_node_get_type(node.get()) == isl_schedule_node_mark)
+      node = node.child(0).child(0);
+  }
+  return node;
+}
+
+/// walk the schedule tree starting from "node" and in
+/// case of a match with the matcher "pattern" modify
+/// the schedule tree using the builder "replacement".
+///
+/// @param node: Root of the subtree to inspect.
+/// @param pattern: Pattern to look-up in the subtree.
+/// @param replacement: Replacement to be applied in case of
+/// a match with @p pattern.
+isl::schedule_node
+replaceDFSPreorderRepeatedly(isl::schedule_node node,
+                             const matchers::ScheduleNodeMatcher &pattern,
+                             const builders::ScheduleNodeBuilder &replacement) {
+
+  node = replaceRepeatedly(node, pattern, replacement);
+  for (int i = 0; i < node.n_children(); i++) {
+    node = replaceDFSPreorderRepeatedly(node.child(i), pattern, replacement)
+               .parent();
+  }
+  return node;
+}
+
+/// Get the memory access using tagged accesses.
+MemoryAccess *getMemoryAccessFromTagged(Scop &s, isl::map schedule,
+                                        std::vector<isl::space> x,
+                                        std::vector<isl::space> y,
+                                        std::string type) {
+
+  isl::space targetSpace;
+  for (size_t i = 0; i < x.size(); i++)
+    for (size_t j = 0; j < y.size(); j++)
+      if (x[i].is_equal(y[j])) {
+        targetSpace = x[i];
+        break;
+      }
+
+  if (targetSpace.is_null()) {
+    LLVM_DEBUG(dbgs() << "schedule :" << schedule.to_str() << "\n");
+    LLVM_DEBUG(dbgs() << "x.size :" << x.size() << "\n");
+    LLVM_DEBUG(dbgs() << "y.size :" << y.size() << "\n");
+    LLVM_DEBUG(dbgs() << "type : " << type << "\n");
+    assert(0 && "intersection failed!");
+  }
+
+  enum MemoryAccess::AccessType AccessTy;
+  if (type.compare("r") == 0)
+    AccessTy = MemoryAccess::AccessType::READ;
+  else
+    AccessTy = MemoryAccess::AccessType::MUST_WRITE;
+
+  for (auto &Stmt : s)
+    for (auto &Acc : Stmt)
+      if (Acc->getType() == AccessTy) {
+        isl::map rel = Acc->getLatestAccessRelation();
+        rel = rel.intersect_domain(Stmt.getDomain());
+        isl::space space = rel.get_space();
+        space = space.range();
+        space = space.from_range();
+        space = space.set_tuple_id(isl::dim::in, Acc->getId());
+        isl::map universe = isl::map::universe(space);
+        rel = rel.domain_product(universe);
+        if (rel.get_space().is_equal(targetSpace))
+          return Acc;
+      }
+
+  LLVM_DEBUG(dbgs() << "schedule : " << schedule.to_str() << "\n");
+  LLVM_DEBUG(dbgs() << "target Space :" << targetSpace.to_str() << "\n");
+  assert(0 && "find not match in the memory accesses for the current space");
+  return nullptr;
+}
+
+// remove unnecessary schedules.
+// Why this function?
+// Most of the time you have schedules as isl::union_map that look like:
+// StmtY[i0, i1, i2] -> [(i0)]; StmtX[i0, i1] -> [(i0)]; StmtXlast[i0, i1] ->
+// [(i0)] From this union_map you would like to extract only a single map. In
+// the above case you would like to extract StmX[i0, i1] or StmtXlast[i0, i1]
+// and check if the access pattern is an initialization stmt.
+isl::union_map removeAdditionalSchedules(isl::union_map schedule,
+                                         int expected_dim) {
+
+  std::vector<isl::map> scheduleAsMaps;
+  schedule.foreach_map([&](isl::map s) -> isl_stat {
+    int dims = s.dim(isl::dim::in);
+    if (dims != expected_dim)
+      return isl_stat_ok;
+    scheduleAsMaps.push_back(s);
+    return isl_stat_ok;
+  });
+
+  if (scheduleAsMaps.size() > 1) {
+    for (size_t i = 0; i < scheduleAsMaps.size(); i++) {
+      for (size_t j = i + 1; j < scheduleAsMaps.size(); j++) {
+        isl::id idOne =
+            scheduleAsMaps[i].get_space().get_tuple_id(isl::dim::in);
+        isl::id idTwo =
+            scheduleAsMaps[j].get_space().get_tuple_id(isl::dim::in);
+        std::string delimiter = "@";
+        std::string sOne =
+            idOne.to_str().substr(0, idOne.to_str().find(delimiter));
+        std::string sTwo =
+            idTwo.to_str().substr(0, idTwo.to_str().find(delimiter));
+        if ((sOne.find(sTwo) != std::string::npos) ||
+            (sTwo.find(sOne) != std::string::npos))
+          scheduleAsMaps.erase(scheduleAsMaps.begin() + i);
+      }
+    }
+  }
+
+  // return the original schedule
+  // if we were not able to remove
+  // additional schedules.
+  if (scheduleAsMaps.size() == 0)
+    return schedule;
+
+  isl::union_map res = isl::union_map(scheduleAsMaps[0]);
+  for (size_t i = 1; i < scheduleAsMaps.size(); i++)
+    res = res.unite(scheduleAsMaps[i]);
+
+  return res;
+}
+
+/// Get a tagged access relation containing all accesses of type @p AccessTy.
+/// Only array accesses are returned (see class MemoryAccess)
+/// Instead of a normal access of the form:
+///
+///   Stmt[i,j,k] -> Array[f_0(i,j,k), f_1(i,j,k)]
+///
+/// a tagged access has the form
+///
+///   [Stmt[i,j,k] -> id[]] -> Array[f_0(i,j,k), f_1(i,j,k)]
+///
+/// where 'id' is an additional space that references the memory access that
+/// triggered the access.
+///
+/// @param AccessTy The type of the memory accesses to collect.
+///
+/// @return The relation describing all tagged memory accesses.
+isl::union_map getTaggedAccesses(Scop &s,
+                                 enum MemoryAccess::AccessType AccessTy) {
+
+  isl::union_map accesses = isl::union_map::empty(s.getParamSpace());
+  for (auto &stmt : s) {
+    for (auto &acc : stmt) {
+      if (acc->getLatestKind() != MemoryKind::Array)
+        continue;
+      if (acc->getType() == AccessTy) {
+        isl::map relation = acc->getLatestAccessRelation();
+        relation = relation.intersect_domain(stmt.getDomain());
+
+        isl::space space = relation.get_space();
+        space = space.range();
+        space = space.from_range();
+        space = space.set_tuple_id(isl::dim::in, acc->getId());
+        isl::map universe = isl::map::universe(space);
+        relation = relation.domain_product(universe);
+        accesses = accesses.add_map(relation);
+      }
+    }
+  }
+  return accesses;
+}
+
+/// Get the set of all read accesses, tagged with access id.
+isl::union_map getTaggedReads(Scop &s) {
+  return getTaggedAccesses(s, MemoryAccess::READ);
+}
+
+/// Get the set of all must write accesses, tagged with access id.
+isl::union_map getTaggedMustWrites(Scop &s) {
+  return getTaggedAccesses(s, MemoryAccess::MUST_WRITE);
+}
+
+/// Given the schedule "schedule" returns
+/// the tagged memory accesses that belong to schedule
+/// and have the provided stmtId.
+isl::union_map getTaggedReads(Scop &s, isl::map schedule, isl::id stmtId) {
+
+  isl::union_map res = isl::union_map::empty(schedule.get_space());
+  isl::union_map taggedReads = getTaggedReads(s);
+  // LLVM_DEBUG(dbgs() << "tagged reads : " << taggedReads.to_str() << "\n");
+  std::vector<isl::map> vecTaggedReads;
+  taggedReads.foreach_map([&](isl::map m) -> isl_stat {
+    vecTaggedReads.push_back(m);
+    return isl_stat_ok;
+  });
+
+  std::string idStmt = stmtId.to_str().substr(0, stmtId.to_str().find("@"));
+
+  for (size_t i = 0; i < vecTaggedReads.size(); i++) {
+    // FIXME do not use regex
+    std::string mapAsString = vecTaggedReads[i].to_str();
+    mapAsString.erase(
+        std::remove_if(mapAsString.begin(), mapAsString.end(), isspace),
+        mapAsString.end());
+    std::smatch match;
+    std::regex getStmtFromMap(R"(\{\[([a-z,A-Z,0-9,_]+))");
+    std::regex_search(mapAsString, match, getStmtFromMap);
+    if (match[1].compare(idStmt) == 0) {
+      res = res.unite(isl::union_map(vecTaggedReads[i]));
+    }
+  }
+  return res;
+}
+
+/// Given the schedule "schedule" returns
+/// the tagged memory accesses that belong to schedule and have
+/// the provided id.
+isl::union_map getTaggedWrites(Scop &s, isl::map schedule, isl::id stmtId) {
+
+  isl::union_map res = isl::union_map::empty(schedule.get_space());
+  isl::union_map taggedWrites = getTaggedMustWrites(s);
+  std::vector<isl::map> vecTaggedWrites;
+  taggedWrites.foreach_map([&](isl::map m) -> isl_stat {
+    vecTaggedWrites.push_back(m);
+    return isl_stat_ok;
+  });
+
+  std::string idStmt = stmtId.to_str().substr(0, stmtId.to_str().find("@"));
+
+  for (size_t i = 0; i < vecTaggedWrites.size(); i++) {
+    // FIXME do not use regex
+    std::string mapAsString = vecTaggedWrites[i].to_str();
+    mapAsString.erase(
+        std::remove_if(mapAsString.begin(), mapAsString.end(), isspace),
+        mapAsString.end());
+    std::smatch match;
+    std::regex getStmtFromMap(R"(\{\[([a-z,A-Z,0-9,_]+))");
+    std::regex_search(mapAsString, match, getStmtFromMap);
+    if (match[1].compare(idStmt) == 0) {
+      res = res.unite(isl::union_map(vecTaggedWrites[i]));
+    }
+  }
+  return res;
+}
+
+bool checkAccessGemmInitStmt(Scop &s, isl::map schedule,
+                             MatMulInfoTyExtended &MMI) {
+
+  assert(MMI.A != nullptr && "Empty MMI.A");
+  assert(MMI.B != nullptr && "Empty MMI.B");
+  assert(MMI.ReadFromC != nullptr && "Empty MMI.ReadFromC");
+  assert(MMI.WriteToC != nullptr && "Empty MMI.WriteToC");
+
+  isl::union_map reads =
+      getTaggedReads(s, schedule, schedule.get_tuple_id(isl::dim::in));
+  isl::union_map writes =
+      getTaggedWrites(s, schedule, schedule.get_tuple_id(isl::dim::in));
+
+  isl::ctx ctx = s.getIslCtx();
+
+  // expect one write.
+  if (writes.n_map() != 1) {
+    LLVM_DEBUG(dbgs() << "Expect at least one write access!\n");
+    LLVM_DEBUG(dbgs() << "#writes: " << writes.n_map() << "\n");
+    return false;
+  }
+
+  isl::map write = isl::map::from_union_map(writes);
+  if (write.dim(isl::dim::in) != 2) {
+    LLVM_DEBUG(dbgs() << "Schedule should have two dimensions!\n");
+    LLVM_DEBUG(dbgs() << "#dims : " << write.dim(isl::dim::in) << "\n");
+    return false;
+  }
+
+  using namespace matchers;
+  using pMatches = Matches<SingleInputDim, FixedOutDimPattern<SimpleAff>>;
+  using pGroup =
+      PlaceholderGroupedSet<SingleInputDim, FixedOutDimPattern<SimpleAff>>;
+
+  using namespace matchers;
+  auto _i = placeholder(ctx);
+  auto _ii = placeholder(ctx);
+  auto _j = placeholder(ctx);
+  auto _jj = placeholder(ctx);
+  auto _A = arrayPlaceholder();
+
+  pGroup psRead, psWrite;
+  pMatches readMatches, writeMatches;
+  std::vector<isl::space> iSpaceCandidates, jSpaceCandidates;
+  std::vector<isl::space> iiSpaceCandidates, jjSpaceCandidates;
+
+  bool hasRead = (reads.n_map() == 1);
+  // we may not have the read access.
+  // i.e., tmp[i][j] = 0;
+  if (hasRead)
+    psRead = allOf(access(_A, _i, _j));
+  psWrite = allOf(access(_A, _ii, _jj));
+  if (hasRead)
+    readMatches = match(reads, psRead);
+  writeMatches = match(writes, psWrite);
+
+  if (hasRead && readMatches.size() != 1) {
+    LLVM_DEBUG(
+        dbgs() << "Read available but do not match the access pattern!\n");
+    return false;
+  }
+  if (writeMatches.size() != 1) {
+    LLVM_DEBUG(dbgs() << "Write do not match the access pattern!\n");
+    return false;
+  }
+
+  if (hasRead) {
+    if (writeMatches[0][_ii].payload().inputDimPos_ !=
+        readMatches[0][_i].payload().inputDimPos_) {
+      LLVM_DEBUG(dbgs() << "Index mismatch for i and ii\n");
+      return false;
+    }
+    if (writeMatches[0][_jj].payload().inputDimPos_ !=
+        readMatches[0][_j].payload().inputDimPos_) {
+      LLVM_DEBUG(dbgs() << "Index mismatch for j and jj\n");
+      return false;
+    }
+  }
+
+  // if we have the read, collect the candidate spaces.
+  if (hasRead) {
+    iSpaceCandidates = readMatches[0][_i].candidateSpaces();
+    jSpaceCandidates = readMatches[0][_j].candidateSpaces();
+  }
+  iiSpaceCandidates = writeMatches[0][_ii].candidateSpaces();
+  jjSpaceCandidates = writeMatches[0][_jj].candidateSpaces();
+
+  MMI.WriteToC_init = getMemoryAccessFromTagged(s, schedule, iiSpaceCandidates,
+                                                jjSpaceCandidates, "w");
+  if (hasRead)
+    MMI.ReadFromC_init = getMemoryAccessFromTagged(
+        s, schedule, iSpaceCandidates, jSpaceCandidates, "r");
+
+  // make sure that MMI.WriteToC_init and MMI.WriteToC are pointing to the same
+  // array.
+  auto idAsStringWriteToC = MMI.WriteToC->getLatestArrayId().to_str();
+  auto idAsStringWriteToC_init = MMI.WriteToC_init->getLatestArrayId().to_str();
+  if (idAsStringWriteToC.compare(idAsStringWriteToC_init) != 0) {
+    LLVM_DEBUG(dbgs() << "WriteToC != WriteToC_init\n");
+    return false;
+  }
+  return true;
+}
+
+bool checkAccessGemmStmt(Scop &s, isl::map schedule,
+                         MatMulInfoTyExtended &MMI) {
+
+  LLVM_DEBUG(
+      dbgs() << "==========================================================\n");
+  // s.dump();
+
+  isl::ctx ctx = s.getIslCtx();
+  isl::union_map reads =
+      getTaggedReads(s, schedule, schedule.get_tuple_id(isl::dim::in));
+  isl::union_map writes =
+      getTaggedWrites(s, schedule, schedule.get_tuple_id(isl::dim::in));
+
+  if (reads.n_map() != 3 || writes.n_map() != 1) {
+    LLVM_DEBUG(dbgs() << "Expect 3 reads and 1 write\n");
+    return false;
+  }
+
+  using namespace matchers;
+  using pGroup =
+      PlaceholderGroupedSet<SingleInputDim, FixedOutDimPattern<SimpleAff>>;
+  auto _i = placeholder(ctx);
+  auto _ii = placeholder(ctx);
+  auto _j = placeholder(ctx);
+  auto _jj = placeholder(ctx);
+  auto _k = placeholder(ctx);
+  auto _A = arrayPlaceholder();
+  auto _B = arrayPlaceholder();
+  auto _C = arrayPlaceholder();
+
+  pGroup psReadNN;
+  bool isNN = false;
+  pGroup psReadNT;
+  bool isNT = false;
+  pGroup psReadTN;
+  bool isTN = false;
+
+  psReadNN = allOf(access(_A, _i, _j), access(_B, _i, _k), access(_C, _k, _j));
+  psReadNT = allOf(access(_A, _i, _j), access(_B, _i, _k), access(_C, _j, _k));
+  psReadTN = allOf(access(_A, _i, _j), access(_B, _k, _i), access(_C, _k, _j));
+  // psRead = allOf(access(_A, _i, _j), access(_B, _k, _i), access(_C, _j, _k));
+
+  auto psWrite = allOf(access(_A, _ii, _jj));
+
+  auto readMatchesNN = match(reads, psReadNN);
+  auto readMatchesNT = match(reads, psReadNT);
+  auto readMatchesTN = match(reads, psReadTN);
+  auto writeMatches = match(writes, psWrite);
+
+  if (readMatchesNN.size() == 1) {
+    if ((writeMatches[0][_ii].payload().inputDimPos_ ==
+         readMatchesNN[0][_i].payload().inputDimPos_) &&
+        (writeMatches[0][_jj].payload().inputDimPos_ ==
+         readMatchesNN[0][_j].payload().inputDimPos_)) {
+      isNN = true;
+    } else {
+      LLVM_DEBUG(
+          dbgs() << "Index mismatch for i and ii or j and jj in gemmNN\n");
+    }
+  }
+
+  if (readMatchesNT.size() == 1) {
+    if ((writeMatches[0][_ii].payload().inputDimPos_ ==
+         readMatchesNT[0][_i].payload().inputDimPos_) &&
+        (writeMatches[0][_jj].payload().inputDimPos_ ==
+         readMatchesNT[0][_j].payload().inputDimPos_)) {
+      isNT = true;
+    } else {
+      LLVM_DEBUG(
+          dbgs() << "Index mismatch for i and ii or j and jj in gemmNT\n");
+    }
+  }
+
+  if (readMatchesTN.size() == 1) {
+    if ((writeMatches[0][_ii].payload().inputDimPos_ ==
+         readMatchesTN[0][_i].payload().inputDimPos_) &&
+        (writeMatches[0][_jj].payload().inputDimPos_ ==
+         readMatchesTN[0][_j].payload().inputDimPos_)) {
+      isTN = true;
+    } else {
+      LLVM_DEBUG(
+          dbgs() << "Index mismatch for i and ii or j and jj in gemmTN\n");
+    }
+  }
+
+  if (isNN) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-NN ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesNN[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesNN[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesNN[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+  if (isNT) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-NT ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesNT[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesNT[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesNT[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+  if (isTN) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-TN ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesTN[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesTN[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesTN[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+
+  LLVM_DEBUG(dbgs() << "isNN :" << isNN << "\n");
+  LLVM_DEBUG(dbgs() << "isNT :" << isNT << "\n");
+  LLVM_DEBUG(dbgs() << "isTN :" << isTN << "\n");
+
+  if (isNN == true && (isNT == true || isTN == true))
+    assert(0 && "isNN true and also isNT or is TN");
+  if (isNT == true && (isNN == true || isTN == true))
+    assert(0 && "isNT true and also isNN or isTN");
+  if (isTN == true && (isNN == true || isNT == true))
+    assert(0 && "isTN true and also isNN or isNT");
+
+  if (isNN == false && isNT == false && isTN == false)
+    return false;
+
+  if (writeMatches.size() != 1)
+    return false;
+
+  if (isNN) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-NN ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesNN[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesNN[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesNN[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+  if (isNT) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-NT ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesNT[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesNT[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesNT[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+  if (isTN) {
+    LLVM_DEBUG(dbgs() << "**** Access pattern GEMM-TN ****\n");
+    LLVM_DEBUG(dbgs() << "_i  " << readMatchesTN[0][_i].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_ii " << writeMatches[0][_ii].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_j  " << readMatchesTN[0][_j].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_jj " << writeMatches[0][_jj].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "_k  " << readMatchesTN[0][_k].payload().inputDimPos_
+                      << "\n");
+    LLVM_DEBUG(dbgs() << "******************************\n");
+  }
+
+  std::vector<isl::space> iSpaceCandidates;
+  std::vector<isl::space> iiSpaceCandidates;
+  std::vector<isl::space> jSpaceCandidates;
+  std::vector<isl::space> jjSpaceCandidates;
+  std::vector<isl::space> kSpaceCandidates;
+
+  if (isNN) {
+    iSpaceCandidates = readMatchesNN[0][_i].candidateSpaces();
+    iiSpaceCandidates = writeMatches[0][_ii].candidateSpaces();
+    jSpaceCandidates = readMatchesNN[0][_j].candidateSpaces();
+    jjSpaceCandidates = writeMatches[0][_jj].candidateSpaces();
+    kSpaceCandidates = readMatchesNN[0][_k].candidateSpaces();
+  }
+  if (isNT) {
+    iSpaceCandidates = readMatchesNT[0][_i].candidateSpaces();
+    iiSpaceCandidates = writeMatches[0][_ii].candidateSpaces();
+    jSpaceCandidates = readMatchesNT[0][_j].candidateSpaces();
+    jjSpaceCandidates = writeMatches[0][_jj].candidateSpaces();
+    kSpaceCandidates = readMatchesNT[0][_k].candidateSpaces();
+  }
+  if (isTN) {
+    iSpaceCandidates = readMatchesTN[0][_i].candidateSpaces();
+    iiSpaceCandidates = writeMatches[0][_ii].candidateSpaces();
+    jSpaceCandidates = readMatchesTN[0][_j].candidateSpaces();
+    jjSpaceCandidates = writeMatches[0][_jj].candidateSpaces();
+    kSpaceCandidates = readMatchesTN[0][_k].candidateSpaces();
+  }
+
+  MMI.WriteToC = getMemoryAccessFromTagged(s, schedule, iiSpaceCandidates,
+                                           jjSpaceCandidates, "w");
+  MMI.ReadFromC = getMemoryAccessFromTagged(s, schedule, iSpaceCandidates,
+                                            jSpaceCandidates, "r");
+  MMI.A = getMemoryAccessFromTagged(s, schedule, iSpaceCandidates,
+                                    kSpaceCandidates, "r");
+  MMI.B = getMemoryAccessFromTagged(s, schedule, kSpaceCandidates,
+                                    jSpaceCandidates, "r");
+
+  if (isNN) {
+    MMI.isTransposeA = false;
+    MMI.isTransposeB = false;
+  }
+  if (isNT) {
+    MMI.isTransposeA = false;
+    MMI.isTransposeB = true;
+  }
+  if (isTN) {
+    MMI.isTransposeA = true;
+    MMI.isTransposeB = false;
+  }
+
+  LLVM_DEBUG(
+      dbgs() << "==========================================================\n");
+  return true;
+}
+
+isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
+
+  isl::schedule_node root = schedule.get_root();
+
+  // see ScheduleOptimizer.h
+  pGemm.flush();
+
+  // check gemm conditions:
+  // 1. We mast have a single-map schedule
+  // 2. The input dimension for the schedule must be >= 3
+  auto hasGemmConditions = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    if (sched.n_map() != 1) {
+      LLVM_DEBUG(dbgs() << "hasGemmConditions: false due to n_map != 1\n");
+      LLVM_DEBUG(dbgs() << "number of map is: " << sched.n_map() << "\n");
+      LLVM_DEBUG(dbgs() << band.to_str() << "\n");
+      return false;
+    }
+    isl::map schedAsMap = isl::map::from_union_map(sched);
+    if (schedAsMap.dim(isl::dim::out) < 3) {
+      LLVM_DEBUG(dbgs() << "hasGemmConditions: false due to in dim < 3\n");
+      LLVM_DEBUG(dbgs() << "output dimension is :"
+                        << schedAsMap.dim(isl::dim::in) << "\n");
+      LLVM_DEBUG(dbgs() << band.to_str() << "\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "hasGemmConditions: true\n");
+    return true;
+  };
+
+  // check gemm access pattern.
+  auto containsMatrMul = [&](isl::schedule_node band) {
+    MatMulInfoTyExtended MMI;
+
+    isl::map scheduleAsMap = isl::map::from_union_map(
+        isl::union_map::from(band.band_get_partial_schedule()));
+
+    if (!checkAccessGemmStmt(s, scheduleAsMap, MMI)) {
+      LLVM_DEBUG(
+          dbgs() << "containsMatrMul: false due to checkAccessGemmStmt\n");
+      return false;
+    }
+    pGemm.detected++;
+    pGemm.patternTys.push_back(MMI);
+    LLVM_DEBUG(dbgs() << "containsMatrMul: true\n");
+    return true;
+  };
+
+  // This callback avoids entering an infinite loop
+  // during recursion (wrapPatternDFSPreorder).
+  // Specifically, the callback checks if the matcher
+  // already fired.
+  auto hasNotFired = [&](isl::schedule_node band) {
+    if (!band.has_parent())
+      return true;
+    auto maybeMark = band.parent();
+    if (isl_schedule_node_get_type(maybeMark.get()) != isl_schedule_node_mark)
+      return true;
+    auto markId = maybeMark.mark_get_id().to_str();
+    markId = markId.substr(0, markId.find("@"));
+    if ((markId.compare("gemm") == 0) || (markId.compare("gemm_init") == 0))
+      return false;
+    else
+      return true;
+  };
+
+  // look for the gemm pattern
+  auto matcherGemm = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return
+      band(_and(hasNotFired, hasGemmConditions, containsMatrMul),
+        leaf());
+    // clang-format on
+  }();
+
+  root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
+                                matcherGemm);
+
+  // early exit if we did not detect any core gemm stmt.
+  // if we did detect a gemm pattern we also look for
+  // a possible initialization stmt.
+  if (!lookUpScheduleTree(root.root().get_schedule(), "gemm")) {
+    return root.root().get_schedule();
+  }
+
+  // check conditions for init stmt.
+  // 1. single-map schedule after removed redundant schedules.
+  auto hasGemmInitConditions = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    sched = removeAdditionalSchedules(sched, 2);
+    if (sched.n_map() != 1) {
+      LLVM_DEBUG(dbgs() << "hasGemmInitConditions: false due to n_map != 1\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "hasGemmInitConditions: true\n");
+    return true;
+  };
+
+  // check the access pattern for the init stmt that must
+  // be compliant with the gemm one.
+  auto containsMatrMulInit = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    sched = removeAdditionalSchedules(sched, 2);
+    isl::map scheduleAsMap = isl::map::from_union_map(sched);
+    if (!checkAccessGemmInitStmt(s, scheduleAsMap,
+                                 pGemm.patternTys[pGemm.current])) {
+      LLVM_DEBUG(
+          dbgs()
+          << "containsMatrMulInit: false due to checkAccessGemmInitStmt\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "containsMatrMulInit: true\n");
+    pGemm.current++;
+    return true;
+  };
+
+  // check if the init stmt dominates and is in the same
+  // subtree of the gemm pattern.
+  // NOTE: we may lose some potential optimization. We may
+  // not find the init stmt if this rule does not apply.
+  auto hasAnnotation = [&](isl::schedule_node mark) {
+    isl::id markId = mark.mark_get_id();
+    std::string idAsString = markId.to_str();
+    idAsString = idAsString.substr(0, idAsString.find("@"));
+    if (idAsString.compare("gemm") == 0) {
+      LLVM_DEBUG(dbgs() << "hasAnnotation -> true\n");
+      return true;
+    }
+    LLVM_DEBUG(dbgs() << "hasAnnotation -> false\n");
+    return false;
+  };
+
+  isl::schedule_node subtree;
+  isl::schedule_node dummySubtree;
+  auto matcherInit = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return
+      band(_and(hasChild(mark(hasAnnotation, band(anyTree(dummySubtree)))), 
+                hasNotFired,
+                hasGemmInitConditions, 
+                containsMatrMulInit),
+        anyTree(subtree));
+    // clang-format on
+  }();
+
+  root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm_init", root,
+                                matcherInit);
+  pGemm.current = 0;
+  return root.root().get_schedule();
+}
+
+static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
+                                                      Scop &s) {
+
+  schedule = isGemmLikeLate(schedule, s);
+  if (lookUpScheduleTree(schedule, "gemm")) {
+    LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
+  }
+  return schedule;
+}
+
+/// Simplify the schedule tree.
+/// given a tree that looks like
+///
+/// schedule (i)
+///    schedule (j)
+///      anyTree
+///
+/// this will get simplify as
+///
+/// schedule(i,j)
+///   anyTree
+///
+/// @param schedule_node: Current schedule node to be simplified.
+isl::schedule_node simplifyTree(isl::schedule_node root) {
+
+  isl::schedule_node parent, child, grandchild;
+  auto matcher = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return band(parent,
+      band(child,
+        anyTree(grandchild)));
+    //clang-format on
+  }();
+    
+  auto merger = builders::ScheduleNodeBuilder();
+  {
+    using namespace builders;
+    // clang-format off
+    auto computeSched = [&]() {
+      isl::multi_union_pw_aff sched =
+        parent.band_get_partial_schedule().flat_range_product(
+          child.band_get_partial_schedule());
+      return sched;
+    };
+    // clang-format on
+    auto st = [&]() { return subtreeBuilder(grandchild); };
+    merger = band(computeSched, subtree(st));
+  }
+
+  root = replaceDFSPreorderRepeatedly(root, matcher, merger);
+  return root.root();
+}
+
+static isl::schedule isGemmLikeEarly(isl::schedule schedule, Scop &s) {
+
+  isl::schedule_node root = schedule.get_root();
+  root = simplifyTree(root);
+
+  // see ScheduleOptimizer.h
+  pGemm.flush();
+
+  // check gemm conditions:
+  // 1. We mast have a single-map schedule
+  // 2. The input dimension for the schedule must be >= 3
+  auto hasGemmConditions = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    if (sched.n_map() != 1) {
+      LLVM_DEBUG(dbgs() << "hasGemmConditions: false due to n_map != 1\n");
+      LLVM_DEBUG(dbgs() << "number of map is: " << sched.n_map() << "\n");
+      return false;
+    }
+    isl::map schedAsMap = isl::map::from_union_map(sched);
+    if (schedAsMap.dim(isl::dim::in) < 3) {
+      LLVM_DEBUG(dbgs() << "hasGemmConditions: false due to in dim < 3\n");
+      LLVM_DEBUG(dbgs() << "input dimension is :"
+                        << schedAsMap.dim(isl::dim::in) << "\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "hasGemmConditions: true\n");
+    return true;
+  };
+
+  // check gemm access pattern.
+  auto containsMatrMul = [&](isl::schedule_node band) {
+    MatMulInfoTyExtended MMI;
+
+    isl::map scheduleAsMap = isl::map::from_union_map(
+        isl::union_map::from(band.band_get_partial_schedule()));
+
+    if (!checkAccessGemmStmt(s, scheduleAsMap, MMI)) {
+      LLVM_DEBUG(
+          dbgs() << "containsMatrMul: false due to checkAccessGemmStmt\n");
+      return false;
+    }
+    pGemm.detected++;
+    pGemm.patternTys.push_back(MMI);
+    LLVM_DEBUG(dbgs() << "containsMatrMul: true\n");
+    return true;
+  };
+
+  // This callback avoids entering an infinite loop
+  // during recursion (wrapPatternDFSPreorder).
+  // Specifically, the callback checks if the matcher
+  // already fired.
+  auto hasNotFired = [&](isl::schedule_node band) {
+    if (!band.has_parent())
+      return true;
+    auto maybeMark = band.parent();
+    if (isl_schedule_node_get_type(maybeMark.get()) != isl_schedule_node_mark)
+      return true;
+    auto markId = maybeMark.mark_get_id().to_str();
+    markId = markId.substr(0, markId.find("@"));
+    if ((markId.compare("gemm") == 0) || (markId.compare("gemm_init") == 0))
+      return false;
+    else
+      return true;
+  };
+
+  // look for the gemm pattern
+  auto matcherGemm = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return
+      band(_and(hasNotFired, hasGemmConditions, containsMatrMul),
+        leaf());
+    // clang-format on
+  }();
+
+  root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
+                                matcherGemm);
+
+  // early exit if we did not detect any core gemm stmt.
+  // if we did detect a gemm pattern we also look for
+  // a possible initialization stmt.
+  if (!lookUpScheduleTree(root.root().get_schedule(), "gemm")) {
+    return root.root().get_schedule();
+  }
+
+  // check conditions for init stmt.
+  // 1. single-map schedule after removed redundant schedules.
+  auto hasGemmInitConditions = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    sched = removeAdditionalSchedules(sched, 2);
+    if (sched.n_map() != 1) {
+      LLVM_DEBUG(dbgs() << "hasGemmInitConditions: false due to n_map != 1\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "hasGemmInitConditions: true\n");
+    return true;
+  };
+
+  // check the access pattern for the init stmt that must
+  // be compliant with the gemm one.
+  auto containsMatrMulInit = [&](isl::schedule_node band) {
+    isl::union_map sched =
+        isl::union_map::from(band.band_get_partial_schedule());
+    sched = removeAdditionalSchedules(sched, 2);
+    isl::map scheduleAsMap = isl::map::from_union_map(sched);
+    if (!checkAccessGemmInitStmt(s, scheduleAsMap,
+                                 pGemm.patternTys[pGemm.current])) {
+      LLVM_DEBUG(
+          dbgs()
+          << "containsMatrMulInit: false due to checkAccessGemmInitStmt\n");
+      return false;
+    }
+    LLVM_DEBUG(dbgs() << "containsMatrMulInit: true\n");
+    pGemm.current++;
+    return true;
+  };
+
+  // check if the init stmt dominates and is in the same
+  // subtree of the gemm pattern.
+  // NOTE: we may lose some potential optimization. We may
+  // not find the init stmt if this rule does not apply.
+  auto hasAnnotation = [&](isl::schedule_node mark) {
+    isl::id markId = mark.mark_get_id();
+    std::string idAsString = markId.to_str();
+    idAsString = idAsString.substr(0, idAsString.find("@"));
+    if (idAsString.compare("gemm") == 0) {
+      LLVM_DEBUG(dbgs() << "hasAnnotation -> true\n");
+      return true;
+    }
+    LLVM_DEBUG(dbgs() << "hasAnnotation -> false\n");
+    return false;
+  };
+
+  isl::schedule_node subtree;
+  isl::schedule_node dummySubtree;
+  auto matcherInit = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return
+      band(_and(hasChild(mark(hasAnnotation, band(anyTree(dummySubtree)))), 
+                hasNotFired,
+                hasGemmInitConditions, 
+                containsMatrMulInit),
+        anyTree(subtree));
+    // clang-format on
+  }();
+
+  root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm_init", root,
+                                matcherInit);
+  pGemm.current = 0;
+  return root.root().get_schedule();
+}
+
+static isl::schedule optimizeScheduleWithMatchersEarly(isl::schedule schedule,
+                                                       Scop &s) {
+
+  schedule = isGemmLikeEarly(schedule, s);
+  if (lookUpScheduleTree(schedule, "gemm")) {
+    LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
+  }
+  return schedule;
+}
+
 bool IslScheduleOptimizer::runOnScop(Scop &S) {
   // Skip SCoPs in case they're already optimised by PPCGCodeGeneration
   if (S.isToBeSkipped())
@@ -1617,14 +2730,24 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
     isl_printer_free(P);
   });
 
-  Function &F = S.getFunction();
-  auto *TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
-  const OptimizerAdditionalInfoTy OAI = {TTI, const_cast<Dependences *>(&D)};
-  auto NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule, &OAI);
+  isl::schedule NewSchedule;
+
+  if (MatcherOptLate) {
+    assert(0 && "do not use this option atm");
+    NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S);
+  }
+  if (MatcherOptEarly) {
+    NewSchedule = optimizeScheduleWithMatchersEarly(S.getScheduleTree(), S);
+  } else {
+    Function &F = S.getFunction();
+    auto *TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
+    const OptimizerAdditionalInfoTy OAI = {TTI, const_cast<Dependences *>(&D)};
+    NewSchedule = ScheduleTreeOptimizer::optimizeSchedule(Schedule, &OAI);
+  }
   walkScheduleTreeForStatistics(NewSchedule, 2);
 
-  if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule))
-    return false;
+  // if (!ScheduleTreeOptimizer::isProfitableSchedule(S, NewSchedule))
+  //  return false;
 
   auto ScopStats = S.getStatistics();
   ScopsOptimized++;
@@ -1633,6 +2756,11 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   S.setScheduleTree(NewSchedule);
   S.markAsOptimized();
+
+  LLVM_DEBUG(dbgs() << "********************************\n");
+  LLVM_DEBUG(dbgs() << "TO CODEGEN\n");
+  LLVM_DEBUG(dbgs() << NewSchedule.get_root().to_str() << "\n");
+  LLVM_DEBUG(dbgs() << "********************************\n");
 
   if (OptimizedScops)
     errs() << S;

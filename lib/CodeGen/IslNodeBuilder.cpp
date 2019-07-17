@@ -397,6 +397,25 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
   isl_ast_node_free(User);
 }
 
+void IslNodeBuilder::insertDummy() {
+
+  Value *number = ConstantFP::get(Builder.getFloatTy(), 1.0);
+
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *f = M->getFunction("hello_cim_lib");
+
+  if (!f) {
+    GlobalValue::LinkageTypes linkage = Function::ExternalLinkage;
+    std::vector<Type *> args;
+    args.push_back(Builder.getFloatTy());
+
+    FunctionType *ty = FunctionType::get(Builder.getVoidTy(), args, false);
+    f = Function::Create(ty, linkage, "hello_cim_lib", M);
+  }
+
+  Builder.CreateCall(f, {number});
+}
+
 void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
   auto *Id = isl_ast_node_mark_get_id(Node);
   auto Child = isl_ast_node_mark_get_node(Node);
@@ -417,6 +436,18 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
   if (strcmp(isl_id_get_name(Id), "Inter iteration alias-free") == 0) {
     auto *BasePtr = static_cast<Value *>(isl_id_get_user(Id));
     Annotator.addInterIterationAliasFreeBasePtr(BasePtr);
+  }
+  if (strcmp(isl_id_get_name(Id), "gemm_init") == 0) {
+    insertDummy();
+    isl_ast_node_free(Child);
+    isl_id_free(Id);
+    return;
+  }
+  if (strcmp(isl_id_get_name(Id), "gemm") == 0) {
+    insertDummy();
+    isl_ast_node_free(Child);
+    isl_id_free(Id);
+    return;
   }
   create(Child);
   isl_id_free(Id);
