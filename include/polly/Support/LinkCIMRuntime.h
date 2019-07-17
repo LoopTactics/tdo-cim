@@ -1,12 +1,7 @@
-//===- Support/LinkCPURuntime.h -- Headerfile to help force-link CPURuntime  =//
-//
-// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
-// See https://llvm.org/LICENSE.txt for license information.
-// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-//
+
 //===----------------------------------------------------------------------===//
 //
-// This header helps pull in libGPURuntime.so
+// This header helps pull in libCIMRuntime.so
 //
 //===----------------------------------------------------------------------===//
 #ifndef POLLY_LINK_CPURUNTIME
