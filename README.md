@@ -18,6 +18,8 @@ Tested with:
 clang version 8.0.1 (http://llvm.org/git/clang.git 2e4c9c5fc864c2c432e4c262a67c42d824b265c6) (http://llvm.org/git/llvm.git ff8c1be17aa3ba7bacb1ef7dcdbecf05d5ab4eb7)
 Target: x86_64-unknown-linux-gnu
 Thread model: posix
+
+Ninja 1.8.2
 ```
 
 To use matchers/builders
