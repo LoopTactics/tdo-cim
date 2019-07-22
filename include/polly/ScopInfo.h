@@ -308,7 +308,10 @@ public:
   /// Return the base pointer.
   Value *getBasePtr() const { return BasePtr; }
 
-  // Set IsOnHeap to the value in parameter.
+  /// Return reference to scop.
+  Scop &getScop() const { return S; }
+
+  /// Set IsOnHeap to the value in parameter.
   void setIsOnHeap(bool value) { IsOnHeap = value; }
 
   /// For indirect accesses return the origin SAI of the BP, else null.
