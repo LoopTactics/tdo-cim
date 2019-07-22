@@ -396,7 +396,7 @@ void IslNodeBuilder::createUserVector(__isl_take isl_ast_node *User,
   isl_id_free(Id);
   isl_ast_node_free(User);
 }
-
+/*
 void IslNodeBuilder::insertDummy() {
 
   Value *number = ConstantFP::get(Builder.getFloatTy(), 1.0);
@@ -414,6 +414,170 @@ void IslNodeBuilder::insertDummy() {
   }
 
   Builder.CreateCall(f, {number});
+}
+*/
+
+/// Return the array extent.
+isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
+  unsigned NumDims = Array->getNumberOfDimensions();
+
+  if (Array->getNumberOfDimensions() == 0)
+    return isl::set::universe(Array->getSpace());
+
+  isl::union_map Accesses = S.getAccesses(Array);
+  isl::union_set AccessUSet = Accesses.range();
+  AccessUSet = AccessUSet.coalesce();
+  AccessUSet = AccessUSet.detect_equalities();
+  AccessUSet = AccessUSet.coalesce();
+
+  if (AccessUSet.is_empty())
+    return isl::set::empty(Array->getSpace());
+
+  isl::set AccessSet = AccessUSet.extract_set(Array->getSpace());
+
+  isl::local_space LS = isl::local_space(Array->getSpace());
+
+  isl::pw_aff Val = isl::aff::var_on_domain(LS, isl::dim::set, 0);
+  isl::pw_aff OuterMin = AccessSet.dim_min(0);
+  isl::pw_aff OuterMax = AccessSet.dim_max(0);
+  OuterMin = OuterMin.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+  OuterMax = OuterMax.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+  OuterMin = OuterMin.set_tuple_id(isl::dim::in, Array->getBasePtrId());
+  OuterMax = OuterMax.set_tuple_id(isl::dim::in, Array->getBasePtrId());
+
+  isl::set Extent = isl::set::universe(Array->getSpace());
+
+  Extent = Extent.intersect(OuterMin.le_set(Val));
+  Extent = Extent.intersect(OuterMax.ge_set(Val));
+
+  for (unsigned i = 1; i < NumDims; ++i)
+    Extent = Extent.lower_bound_si(isl::dim::set, i, 0);
+
+  for (unsigned i = 0; i < NumDims; ++i) {
+    isl::pw_aff PwAff = Array->getDimensionSizePw(i);
+
+    // isl_pw_aff can be NULL for zero dimension. Only in the case of a
+    // Fortran array will we have a legitimate dimension.
+    if (PwAff.is_null()) {
+      assert(i == 0 && "invalid dimension isl_pw_aff for nonzero dimension");
+      continue;
+    }
+    isl::pw_aff Val = isl::aff::var_on_domain(
+        isl::local_space(Array->getSpace()), isl::dim::set, i);
+    PwAff = PwAff.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+    PwAff = PwAff.set_tuple_id(isl::dim::in, Val.get_tuple_id(isl::dim::in));
+    isl::set Set = PwAff.gt_set(Val);
+    Extent = Set.intersect(Extent);
+  }
+
+  return Extent;
+}
+
+/// Return lower and upper bound for a given dimension
+/// of a given array.
+/// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
+/// getDimensionBounds(A, 0) returns:
+/// -> 0 as lower bound
+/// -> 1024 as upper bound
+///
+/// If we cannot statically compute the array bounds the
+/// function returns (-1, -1)
+std::pair<isl::val, isl::val> IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
+
+  
+  assert(static_cast<size_t>(dim) < extent.dim(isl::dim::set) && "must be less!\n");
+
+  isl::pw_aff lower_bound = extent.dim_min(dim);
+  isl::pw_aff upper_bound = extent.dim_max(dim);
+  
+  assert(lower_bound.n_piece() == 1 && "expect single piece");
+  assert(upper_bound.n_piece() == 1 && "expect single piece");
+
+  isl::val lower_bound_val;
+  isl::val upper_bound_val;
+  lower_bound.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+    lower_bound_val = a.get_constant_val();
+    return isl_stat_ok;
+  });
+  upper_bound.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+    upper_bound_val = a.get_constant_val();
+    return isl_stat_ok;
+  });
+
+  upper_bound_val = upper_bound_val.add(isl::val::one(ctx));
+  return std::make_pair(lower_bound_val, upper_bound_val);
+}
+
+/// Get the dimensions bounds for a 2d array.
+/// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
+/// getArrayBounds(A) returns:
+/// -> 0 as lower bound for dimension i
+/// -> 1024 as upper bound for dimension i
+/// -> 0 as lower bound for dimension j
+/// -> 2048 as upper bound for dimension j
+std::tuple<isl::val, isl::val, isl::val, isl::val> 
+IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
+
+  isl::ctx ctx = Array->getScop().getIslCtx();
+  isl::val negone = isl::val::negone(ctx);
+
+  if (!Array->isArrayKind()) {
+    return std::make_tuple(
+      negone, negone,
+      negone, negone);
+  }
+
+  size_t dims = Array->getNumberOfDimensions();
+  if (dims != 2) {
+    LLVM_DEBUG(dbgs() << "Expect 2d arrays only!\n");
+    return std::make_tuple(
+      negone, negone,
+      negone, negone);
+  }
+  
+  isl::set extent = getArrayExtent(Array);
+  if (extent.is_empty()) {
+    LLVM_DEBUG(dbgs() << "Cannot statically compute the array bounds!\n");
+    return std::make_tuple(negone, negone,
+                           negone, negone);
+  }
+
+  std::pair<isl::val, isl::val> dims_i = getDimensionBounds(ctx, extent, 0);
+  std::pair<isl::val, isl::val> dims_j = getDimensionBounds(ctx, extent, 1);
+
+  if (dims_i.first.eq(negone) || dims_i.second.eq(negone) ||
+      dims_j.first.eq(negone) || dims_i.second.eq(negone)) {
+    LLVM_DEBUG(dbgs() << "Cannot statically compute array bounds!\n");
+    return std::make_tuple(
+      negone, negone, 
+      negone, negone);
+  }
+
+  return std::make_tuple(dims_i.first, dims_i.second,
+                         dims_j.first, dims_j.second);
+      
+}
+
+void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
+
+  //ScopArrayInfo *SAI_A =
+  //  const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());
+  //ScopArrayInfo *SAI_B =
+  //  const_cast<ScopArrayInfo *>(MMI.B->getLatestScopArrayInfo());
+  ScopArrayInfo *SAI_C =
+    const_cast<ScopArrayInfo *>(MMI.WriteToC->getLatestScopArrayInfo());
+
+
+  // array bounds for C.
+  auto C_bounds = getArrayBounds(SAI_C);  
+  LLVM_DEBUG(dbgs() << "dim: " << std::get<0>(C_bounds).to_str() << "\n");
+  LLVM_DEBUG(dbgs() << "dim: " << std::get<1>(C_bounds).to_str() << "\n");
+  LLVM_DEBUG(dbgs() << "dim: " << std::get<2>(C_bounds).to_str() << "\n");
+  LLVM_DEBUG(dbgs() << "dim: " << std::get<3>(C_bounds).to_str() << "\n");
+
+  // get the base pointer for C.
+  Value *C_base_pointer = SAI_C->getBasePtr();
+  C_base_pointer->dump();
 }
 
 void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
@@ -438,13 +602,15 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
     Annotator.addInterIterationAliasFreeBasePtr(BasePtr);
   }
   if (strcmp(isl_id_get_name(Id), "gemm_init") == 0) {
-    insertDummy();
+    auto p = static_cast<Payload<MatMulInfoTyExtended> *>(isl_id_get_user(Id));
+    insertCimGemm(p->patternTys[p->current]);
     isl_ast_node_free(Child);
     isl_id_free(Id);
     return;
   }
   if (strcmp(isl_id_get_name(Id), "gemm") == 0) {
-    insertDummy();
+    auto p = static_cast<Payload<MatMulInfoTyExtended> *>(isl_id_get_user(Id));
+    insertCimGemm(p->patternTys[p->current]);
     isl_ast_node_free(Child);
     isl_id_free(Id);
     return;

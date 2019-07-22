@@ -15,6 +15,7 @@
 #ifndef POLLY_ISLNODEBUILDER_H
 #define POLLY_ISLNODEBUILDER_H
 
+#include "polly/ScheduleOptimizer.h"
 #include "polly/CodeGen/BlockGenerators.h"
 #include "polly/CodeGen/IslExprBuilder.h"
 #include "polly/ScopDetectionDiagnostic.h"
@@ -457,7 +458,11 @@ private:
   /// See [Code generation of induction variables of loops outside Scops]
   Value *materializeNonScopLoopInductionVariable(const Loop *L);
 
-  void insertDummy();
+  //void insertDummy();
+  void insertCimGemm(MatMulInfoTyExtended &MMI);
+  isl::set getArrayExtent(ScopArrayInfo *Array);
+  std::tuple<isl::val, isl::val, isl::val, isl::val> getArrayBounds(ScopArrayInfo *Array);
+  std::pair<isl::val, isl::val> getDimensionBounds(isl::ctx ctx, isl::set extent, int dim);
 };
 
 #endif // POLLY_ISLNODEBUILDER_H
