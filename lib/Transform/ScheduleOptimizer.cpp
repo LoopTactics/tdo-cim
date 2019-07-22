@@ -315,6 +315,8 @@ STATISTIC(PrevectOpts, "Number of strip-mining for prevectorization applied");
 STATISTIC(MatMulOpts,
           "Number of matrix multiplication patterns detected and optimized");
 
+constexpr int TILE_FACTOR_CIM_DEVICE = 256;
+
 /// Create an isl::union_set, which describes the isolate option based on
 /// IsolateDomain.
 ///
@@ -1617,8 +1619,8 @@ replaceRepeatedly(isl::schedule_node node,
     // an infinate loop, since they subtree under the mark will always
     // match the matcher. Escape this skipping the mark node and the
     // root node of the matcher.
-    if (isl_schedule_node_get_type(node.get()) == isl_schedule_node_mark)
-      node = node.child(0).child(0);
+    //if (isl_schedule_node_get_type(node.get()) == isl_schedule_node_mark)
+    //  node = node.child(0).child(0);
   }
   return node;
 }
@@ -1640,6 +1642,37 @@ replaceDFSPreorderRepeatedly(isl::schedule_node node,
   for (int i = 0; i < node.n_children(); i++) {
     node = replaceDFSPreorderRepeatedly(node.child(i), pattern, replacement)
                .parent();
+  }
+  return node;
+}
+
+/// Helper function for replaceDFSPreorderOnce.
+isl::schedule_node
+replaceOnce(isl::schedule_node node,
+            const matchers::ScheduleNodeMatcher &pattern,
+            const builders::ScheduleNodeBuilder &replacement) {
+  if (matchers::ScheduleNodeMatcher::isMatching(pattern, node)) {
+    node = rebuild(node, replacement);
+  }
+  return node;
+}
+
+/// walk the schedule tree starting from "node" and in
+/// case of a match with the matcher "pattern" modify
+/// the schedule tree using the builder "replacement".
+///
+/// @param node: Root of the subtree to inspect.
+/// @param pattern: Pattern to look-up in the subtree.
+/// @param replacement: Replacement to be applied in case of
+/// a match with @p pattern.
+/// Apply the builder only once.
+isl::schedule_node
+replaceDFSPreorderOnce(isl::schedule_node node,
+                       const matchers::ScheduleNodeMatcher &pattern,
+                       const builders::ScheduleNodeBuilder &replacement) {
+  node = replaceOnce(node, pattern, replacement);
+  for (int i = 0; i < node.n_children(); ++i) {
+    node = replaceDFSPreorderOnce(node.child(i), pattern, replacement).parent();
   }
   return node;
 }
@@ -2205,6 +2238,26 @@ bool checkAccessGemmStmt(Scop &s, isl::map schedule,
   return true;
 }
 
+/// Apply the tiling transformation.
+std::pair<isl::multi_union_pw_aff, isl::multi_union_pw_aff>
+tile_node(isl::schedule_node node, int tileSize) {
+
+  auto space = isl::manage(isl_schedule_node_band_get_space(node.get()));
+  auto dims = space.dim(isl::dim::set);
+  auto sizes = isl::multi_val::zero(space);
+
+  for (unsigned i = 0; i < dims; i++) {
+    sizes = sizes.set_val(i, isl::val(node.get_ctx(), tileSize));
+  }
+
+  node =
+      isl::manage(isl_schedule_node_band_tile(node.release(), sizes.release()));
+  auto res = std::make_pair(node.band_get_partial_schedule(),
+                            node.child(0).band_get_partial_schedule());
+  return res;
+}
+
+// is the pattern gemm-like?
 isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
 
   isl::schedule_node root = schedule.get_root();
@@ -2273,21 +2326,54 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   };
 
   // look for the gemm pattern
+  isl::schedule_node gemm_body;
   auto matcherGemm = [&]() {
     using namespace matchers;
     // clang-format off
     return
-      band(_and(hasNotFired, hasGemmConditions, containsMatrMul),
+      band(_and(hasNotFired, hasGemmConditions, containsMatrMul), gemm_body,
         leaf());
     // clang-format on
   }();
 
-  root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
-                                matcherGemm);
+  // rebuild gemm pattern with a fixed tile size,
+  // needed by the cim device.
+  auto builderGemm = builders::ScheduleNodeBuilder(); 
+  {
+    using namespace builders;
+    // clang-format off
+    auto computeScheduleTile = [&]() {
+      auto descr =
+        BandDescriptor(gemm_body);
+      auto tiled_schedule = tile_node(gemm_body, TILE_FACTOR_CIM_DEVICE);
+      descr.partialSchedule = tiled_schedule.first;
+      return descr;
+    };
+    auto computeSchedulePoint = [&]() {
+      auto descr =
+        BandDescriptor(gemm_body);
+      auto tiled_schedule = tile_node(gemm_body, TILE_FACTOR_CIM_DEVICE);
+      descr.partialSchedule = tiled_schedule.second;
+      return descr;
+    };
+    auto marker = [&]() {
+      return isl::id::alloc(s.getIslCtx(), "gemm", &pGemm);
+    };
+    builderGemm = band(computeScheduleTile,
+        mark(marker,
+          band(computeSchedulePoint))); 
+  }
+
+  //root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
+  //                              matcherGemm);
+  root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
 
   // early exit if we did not detect any core gemm stmt.
   // if we did detect a gemm pattern we also look for
   // a possible initialization stmt.
+  // FIXME: Kanishkan are we also interested in the detecting 
+  // init stmt for gemm? If not we early exit here and drop 
+  // matcherInit.
   if (!lookUpScheduleTree(root.root().get_schedule(), "gemm")) {
     return root.root().get_schedule();
   }
@@ -2573,6 +2659,8 @@ static isl::schedule isGemmLikeEarly(isl::schedule schedule, Scop &s) {
 static isl::schedule optimizeScheduleWithMatchersEarly(isl::schedule schedule,
                                                        Scop &s) {
 
+  assert(0 
+    && "Use optimizeScheduleWithMatchersLate, this flow is not available atm");
   schedule = isGemmLikeEarly(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
@@ -2733,12 +2821,13 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
   isl::schedule NewSchedule;
 
   if (MatcherOptLate) {
-    assert(0 && "do not use this option atm");
+    //assert(0 && "do not use this option atm");
     NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S);
   }
   if (MatcherOptEarly) {
     NewSchedule = optimizeScheduleWithMatchersEarly(S.getScheduleTree(), S);
-  } else {
+  } 
+  if (!MatcherOptLate && !MatcherOptEarly) {
     Function &F = S.getFunction();
     auto *TTI = &getAnalysis<TargetTransformInfoWrapperPass>().getTTI(F);
     const OptimizerAdditionalInfoTy OAI = {TTI, const_cast<Dependences *>(&D)};
