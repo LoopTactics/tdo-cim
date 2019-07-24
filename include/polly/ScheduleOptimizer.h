@@ -45,6 +45,11 @@ struct Dependences;
 class MemoryAccess;
 class Scop;
 
+enum class Tactic {
+  TILING,
+  FUSION
+};
+
 /// Parameters for the matrix-matrix multiplication.
 struct MatMulInfoTyExtended {
 

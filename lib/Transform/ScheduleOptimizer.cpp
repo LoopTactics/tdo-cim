@@ -1678,7 +1678,7 @@ replaceDFSPreorderOnce(isl::schedule_node node,
 }
 
 /// Get the memory access using tagged accesses.
-MemoryAccess *getMemoryAccessFromTagged(Scop &s, isl::map schedule,
+MemoryAccess *getMemoryAccessFromTagged(const Scop &s, isl::map schedule,
                                         std::vector<isl::space> x,
                                         std::vector<isl::space> y,
                                         std::string type) {
@@ -1793,7 +1793,7 @@ isl::union_map removeAdditionalSchedules(isl::union_map schedule,
 /// @param AccessTy The type of the memory accesses to collect.
 ///
 /// @return The relation describing all tagged memory accesses.
-isl::union_map getTaggedAccesses(Scop &s,
+isl::union_map getTaggedAccesses(const Scop &s,
                                  enum MemoryAccess::AccessType AccessTy) {
 
   isl::union_map accesses = isl::union_map::empty(s.getParamSpace());
@@ -1819,19 +1819,19 @@ isl::union_map getTaggedAccesses(Scop &s,
 }
 
 /// Get the set of all read accesses, tagged with access id.
-isl::union_map getTaggedReads(Scop &s) {
+isl::union_map getTaggedReads(const Scop &s) {
   return getTaggedAccesses(s, MemoryAccess::READ);
 }
 
 /// Get the set of all must write accesses, tagged with access id.
-isl::union_map getTaggedMustWrites(Scop &s) {
+isl::union_map getTaggedMustWrites(const Scop &s) {
   return getTaggedAccesses(s, MemoryAccess::MUST_WRITE);
 }
 
 /// Given the schedule "schedule" returns
 /// the tagged memory accesses that belong to schedule
 /// and have the provided stmtId.
-isl::union_map getTaggedReads(Scop &s, isl::map schedule, isl::id stmtId) {
+isl::union_map getTaggedReads(const Scop &s, isl::map schedule, isl::id stmtId) {
 
   isl::union_map res = isl::union_map::empty(schedule.get_space());
   isl::union_map taggedReads = getTaggedReads(s);
@@ -1863,7 +1863,7 @@ isl::union_map getTaggedReads(Scop &s, isl::map schedule, isl::id stmtId) {
 /// Given the schedule "schedule" returns
 /// the tagged memory accesses that belong to schedule and have
 /// the provided id.
-isl::union_map getTaggedWrites(Scop &s, isl::map schedule, isl::id stmtId) {
+isl::union_map getTaggedWrites(const Scop &s, isl::map schedule, isl::id stmtId) {
 
   isl::union_map res = isl::union_map::empty(schedule.get_space());
   isl::union_map taggedWrites = getTaggedMustWrites(s);
@@ -1891,7 +1891,7 @@ isl::union_map getTaggedWrites(Scop &s, isl::map schedule, isl::id stmtId) {
   return res;
 }
 
-bool checkAccessGemmInitStmt(Scop &s, isl::map schedule,
+bool checkAccessGemmInitStmt(const Scop &s, isl::map schedule,
                              MatMulInfoTyExtended &MMI) {
 
   assert(MMI.A != nullptr && "Empty MMI.A");
@@ -1995,7 +1995,7 @@ bool checkAccessGemmInitStmt(Scop &s, isl::map schedule,
   return true;
 }
 
-bool checkAccessGemmStmt(Scop &s, isl::map schedule,
+bool checkAccessGemmStmt(const Scop &s, isl::map schedule,
                          MatMulInfoTyExtended &MMI) {
 
   LLVM_DEBUG(
@@ -2257,8 +2257,10 @@ tile_node(isl::schedule_node node, int tileSize) {
   return res;
 }
 
+// fw. decl.
+isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule, const Scop &s);
 // is the pattern gemm-like?
-isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
+isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic tac) {
 
   isl::schedule_node root = schedule.get_root();
 
@@ -2396,13 +2398,21 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
     auto marker = [&]() {
       return isl::id::alloc(s.getIslCtx(), "gemm", &pGemm);
     };
-    builderGemm = 
-      band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
+    auto originalSchedule = [&]() {
+      auto descr = BandDescriptor(gemm_body);
+      return descr; 
+    };
+    builderGemm = (tac == Tactic::TILING) ?
+      band(computeScheduleTile, mark(marker, band(computeSchedulePoint))) :
+      mark(marker, band(originalSchedule));
   }
 
-  // wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
-  //                        matcherGemm) :
   root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
+
+  if (tac == Tactic::FUSION) {
+    root = 
+      fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s).get_root();
+  }
 
   // early exit if we did not detect any core gemm stmt.
   // if we did detect a gemm pattern we also look for
@@ -2542,7 +2552,7 @@ static bool checkFusion() {
 // TODO: Kanishkan: We need to have a cost function for fusion for the CIM
 // device. Any idea? 
 isl::schedule fuseTwoConsecutiveGemmIfNotTiled
-(isl::schedule schedule, Scop &s) {
+(isl::schedule schedule, const Scop &s) {
 
   // early exit if the number of gemm pattern detected 
   // is less than two.
@@ -2790,17 +2800,20 @@ static isl::schedule isGemvLikeLate(isl::schedule schedule, Scop &s) {
 }
 
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
-                                                      Scop &s) {
+                                                      const Scop &s,
+                                                      const Tactic &tac) {
 
-  //schedule = isGemmLikeLate(schedule, s);
+  schedule = isGemmLikeLate(schedule, s, tac);
   //schedule = fuseTwoConsecutiveGemmIfNotTiled(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }
+/*
   schedule = isGemvLikeLate(schedule, s);
   if (lookUpScheduleTree(schedule, "gemv")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMV pattern detected!\n");
   }
+*/
   return schedule;
 }
 
@@ -3167,9 +3180,10 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl::schedule NewSchedule;
 
+  Tactic tac = Tactic::FUSION;
+
   if (MatcherOptLate) {
-    // assert(0 && "do not use this option atm");
-    NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S);
+    NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S, tac);
   }
   if (MatcherOptEarly) {
     NewSchedule = optimizeScheduleWithMatchersEarly(S.getScheduleTree(), S);
