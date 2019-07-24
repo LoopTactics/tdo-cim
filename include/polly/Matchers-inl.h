@@ -188,11 +188,7 @@ DEF_TYPE_MATCHER(set, ScheduleNodeType::Set)
   inline ScheduleNodeMatcher name(                                             \
       std::function<bool(isl::schedule_node)> callback,                        \
       isl::schedule_node &capture, ScheduleNodeMatcher &&child) {              \
-    ScheduleNodeMatcher matcher(capture);                                      \
-    matcher.current_ = type;                                                   \
-    matcher.needToCapture_ = true;                                             \
-    matcher.children_.emplace_back(child);                                     \
-    matcher.capture_ = capture;                                                \
+    ScheduleNodeMatcher matcher = name(true, capture, std::move(child));       \
     matcher.nodeCallback_ = callback;                                          \
     return matcher;                                                            \
   }
