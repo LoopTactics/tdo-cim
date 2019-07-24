@@ -2478,38 +2478,123 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   return root.root().get_schedule();
 }
 
-isl::schedule fusionAttempt(isl::schedule schedule, Scop &s) {
+static bool checkFusionHelper(std::string a_x, std::string b_x,
+  std::string c_x, std::string a_y, std::string b_y, std::string c_y) {
+
+  if (c_y.compare(c_x) == 0)
+    return false;
+  if ((a_y.compare(c_x) == 0) || (b_y.compare(c_x) == 0))
+    return false;
+  return true;
+}
+
+static bool checkFusion() {
+
+  assert(pGemm.patternTys.size() == 2);
+  
+  ScopArrayInfo *sai_a_x =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[0].A->getLatestScopArrayInfo());
+  ScopArrayInfo *sai_b_x =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[0].B->getLatestScopArrayInfo());
+  ScopArrayInfo *sai_c_x =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[0].WriteToC->getLatestScopArrayInfo());
+
+  ScopArrayInfo *sai_a_y =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[1].A->getLatestScopArrayInfo());
+  ScopArrayInfo *sai_b_y =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[1].B->getLatestScopArrayInfo());
+  ScopArrayInfo *sai_c_y =
+    const_cast<ScopArrayInfo *>(
+      pGemm.patternTys[1].WriteToC->getLatestScopArrayInfo());
+
+  std::string a_x = sai_a_x->getName();
+  std::string b_x = sai_b_x->getName(); 
+  std::string c_x = sai_c_x->getName();
+  std::string a_y = sai_a_y->getName();
+  std::string b_y = sai_b_y->getName();
+  std::string c_y = sai_c_y->getName();
+
+  return checkFusionHelper(a_x, b_x, c_x, a_y, b_y, c_y);
+}
+
+
+// First attemp to kernel fusion.
+// 
+// We fuse two *consecutive* gemm pattern
+// if *not tiled*.
+// In addition, we fuse only if the two kernels are
+// idependent, meaning that the following condition 
+// should hold:
+// 1. Given to fusion candidates X and Y with Y following *directly* X
+// Y must not read from or write to any output of X and does not
+// write to any input of Y.
+// This function **must** be called after isGemmLikeLate
+// TODO: Kanishkan: We need to have a cost function for fusion for the CIM
+// device. Any idea? 
+isl::schedule fuseTwoConsecutiveGemmIfNotTiled
+(isl::schedule schedule, Scop &s) {
+
+  // early exit if the number of gemm pattern detected 
+  // is less than two.
+  if (pGemm.patternTys.size() < 2) {
+    return schedule;
+  }
+
+  bool is_fusion_valid = checkFusion();
+  if (!is_fusion_valid)
+    return schedule;
 
   isl::schedule_node root = schedule.get_root();
+
+  auto hasGemmId = [&](isl::schedule_node mark) {
+    
+    auto mark_id = mark.mark_get_id().to_str();
+    mark_id = mark_id.substr(0, mark_id.find("@"));
+    if (!mark_id.compare("gemm") == 0) {
+      return false;
+    }
+    return true;
+  };
 
   isl::schedule_node domain_node;
   isl::schedule_node filter_node_upper, filter_node_lower;
   isl::schedule_node schedule_node_upper, schedule_node_lower;
   auto matcher = [&]() {
+    // clang-forma off
     using namespace matchers;
     return domain(
-        domain_node,
-        sequence(filter(filter_node_upper, band(schedule_node_upper, leaf())),
-                 filter(filter_node_lower, band(schedule_node_lower, leaf()))));
+      domain_node,
+        sequence(filter(filter_node_upper, 
+                   mark(hasGemmId, band(schedule_node_upper, leaf()))),
+                 filter(filter_node_lower, 
+                   mark(hasGemmId, band(schedule_node_lower, leaf())))));
   }();
+  // clang-format on
 
   if (!matchers::ScheduleNodeMatcher::isMatching(matcher, root))
     return schedule;
 
-  auto flat_schedule = schedule_node_upper.band_get_partial_schedule();
-  flat_schedule =
-      flat_schedule.union_add(schedule_node_lower.band_get_partial_schedule());
+  auto fused_schedule = schedule_node_upper.band_get_partial_schedule();
+  fused_schedule =
+      fused_schedule.union_add(schedule_node_lower.band_get_partial_schedule());
 
   // XXX: we cannot cut in between sequence, so we need
   // to recompute the *entire* tree. This limits the applicability
   // of this transformation.
   auto new_root = [&]() {
     using namespace builders;
+    // clang-format off
     auto builder =
         domain(domain_node.domain_get_domain(),
-               band(flat_schedule,
+               band(fused_schedule,
                     sequence(filter(filter_node_upper.filter_get_filter()),
-                             filter(filter_node_lower.filter_get_filter()))));
+                             filter(filter_node_lower.filter_get_filter()))));  
+    // clang-format on
     return builder.build();
   }();
 
@@ -2519,8 +2604,8 @@ isl::schedule fusionAttempt(isl::schedule schedule, Scop &s) {
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       Scop &s) {
 
-  // schedule = fusionAttempt(schedule, s);
   schedule = isGemmLikeLate(schedule, s);
+  schedule = fuseTwoConsecutiveGemmIfNotTiled(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }
