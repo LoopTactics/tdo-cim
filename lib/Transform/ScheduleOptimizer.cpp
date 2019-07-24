@@ -315,7 +315,7 @@ STATISTIC(PrevectOpts, "Number of strip-mining for prevectorization applied");
 STATISTIC(MatMulOpts,
           "Number of matrix multiplication patterns detected and optimized");
 
-constexpr int TILE_FACTOR_CIM_DEVICE = 256;
+constexpr int TILE_FACTOR_CIM_DEVICE = 2048;
 
 /// Create an isl::union_set, which describes the isolate option based on
 /// IsolateDomain.
@@ -2337,11 +2337,41 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   }();
 
   // rebuild gemm pattern with a fixed tile size,
-  // needed by the cim device.
+  // needed by the cim device. If the tile size 
+  // is greater than the array dimension insert only
+  // the marker node.
   auto builderGemm = builders::ScheduleNodeBuilder(); 
   {
     using namespace builders;
-    // clang-format off
+
+    // avoid tiling if the array dimensions are less
+    // than the tile size.
+    // FIXME: What if the dimension of the array are not
+    // known?
+    bool tile = [&]() {
+      auto schedule = 
+        gemm_body.get_prefix_schedule_union_map();
+      schedule = schedule.intersect_domain(s.getDomains());
+      
+      int val_as_int = 0; 
+      
+      schedule.foreach_map([&](isl::map m) {
+        auto max = m.range().dim_max(0);
+        isl::val val_max;
+        if (max.n_piece() != 1)
+          return isl_stat_ok;
+        max.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+          val_max = a.get_constant_val();
+          return isl_stat_ok;
+        });
+        val_as_int = std::stoi(val_max.to_str());
+        return isl_stat_ok;
+      });
+      if (val_as_int < TILE_FACTOR_CIM_DEVICE)
+        return false;
+      return true;
+    }();
+
     auto computeScheduleTile = [&]() {
       auto descr =
         BandDescriptor(gemm_body);
@@ -2359,13 +2389,18 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
     auto marker = [&]() {
       return isl::id::alloc(s.getIslCtx(), "gemm", &pGemm);
     };
-    builderGemm = band(computeScheduleTile,
-        mark(marker,
-          band(computeSchedulePoint))); 
+    auto recomputeOriginalSchedule = [&]() {
+      auto descr =
+        BandDescriptor(gemm_body);
+      return descr;
+    };
+    builderGemm = (tile) ?
+      band(computeScheduleTile, mark(marker, band(computeSchedulePoint))) :
+      mark(marker, band(recomputeOriginalSchedule));
   }
 
-  //root = wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
-  //                              matcherGemm);
+  //wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
+  //                        matcherGemm) :
   root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
 
   // early exit if we did not detect any core gemm stmt.
@@ -2447,9 +2482,52 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   return root.root().get_schedule();
 }
 
+isl::schedule fusionAttempt(isl::schedule schedule, Scop &s) {
+
+  isl::schedule_node root = schedule.get_root();
+
+  isl::schedule_node domain_node;
+  isl::schedule_node filter_node_upper, filter_node_lower;
+  isl::schedule_node schedule_node_upper, schedule_node_lower;  
+  auto matcher = [&]() {
+    using namespace matchers;
+    return    
+      domain(domain_node,         
+        sequence(
+          filter(filter_node_upper,
+            band(schedule_node_upper, leaf())),
+          filter(filter_node_lower,
+            band(schedule_node_lower, leaf()))));
+  }();
+
+  if (!matchers::ScheduleNodeMatcher::isMatching(matcher, root))
+    return schedule;
+
+  auto flat_schedule = schedule_node_upper.band_get_partial_schedule();  
+  flat_schedule = flat_schedule.union_add(schedule_node_lower.band_get_partial_schedule());
+
+  //XXX: we cannot cut in between sequence, so we need
+  // to recompute the *entire* tree. This limits the applicability
+  // of this transformation.
+  auto new_root = [&]() {
+
+    using namespace builders;
+    auto builder =
+      domain(domain_node.domain_get_domain(),
+        band(flat_schedule,
+          sequence(
+            filter(filter_node_upper.filter_get_filter()),
+            filter(filter_node_lower.filter_get_filter()))));
+    return builder.build();
+  }();  
+
+  return new_root.get_schedule();
+}
+
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       Scop &s) {
 
+  //schedule = fusionAttempt(schedule, s);
   schedule = isGemmLikeLate(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
