@@ -60,6 +60,17 @@ struct MatMulInfoTyExtended {
   bool isTransposeB = false;
 };
 
+/// Parameters for the matrix-vector multiplication.
+struct MatVecInfoTy {
+
+  MemoryAccess *ReadFromY = nullptr;
+  MemoryAccess *WriteToY = nullptr;
+  MemoryAccess *A = nullptr;
+  MemoryAccess *X = nullptr;
+
+  bool isTranspose = false;
+};
+
 template <typename T> class Payload {
 public:
   int detected = 0;
@@ -75,6 +86,7 @@ public:
 
 // FIXME: static is ok?
 static Payload<MatMulInfoTyExtended> pGemm;
+static Payload<MatVecInfoTy> pGemv;
 
 /// Additional parameters of the schedule optimizer.
 ///

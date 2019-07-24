@@ -2376,9 +2376,7 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   }();
 
   // rebuild gemm pattern with a fixed tile size,
-  // needed by the cim device. If the tile size
-  // is greater than the array dimension insert only
-  // the marker node.
+  // needed by the cim device. 
   auto builderGemm = builders::ScheduleNodeBuilder();
   {
     using namespace builders;
@@ -2608,13 +2606,200 @@ isl::schedule fuseTwoConsecutiveGemmIfNotTiled
   return new_root.get_schedule();
 }
 
+bool checkAccessGemvStmt(Scop &s, isl::map schedule, MatVecInfoTy &MVI) {
+
+  isl::ctx ctx = s.getIslCtx();
+
+  isl::union_map reads =
+      getTaggedReads(s, schedule, schedule.get_tuple_id(isl::dim::in));
+  isl::union_map writes =
+      getTaggedWrites(s, schedule, schedule.get_tuple_id(isl::dim::in));
+
+  if (reads.n_map() != 3 || writes.n_map() != 1) {
+    LLVM_DEBUG(dbgs() << "Expect 3 reads and 1 write for gemv!\n");
+    LLVM_DEBUG(dbgs() << "reads : " << reads.to_str() << "\n");
+    LLVM_DEBUG(dbgs() << "Writes : " << writes.to_str() << "\n");
+    LLVM_DEBUG(dbgs() << "#reads : " << reads.n_map() << "\n");
+    LLVM_DEBUG(dbgs() << "#writes : " << writes.n_map() << "\n");
+    return false;
+  }
+
+  // check additional condition on write. Expect access to
+  // 1D vector in a 2d nested loop.
+  isl::map writeAsMap = isl::map::from_union_map(writes);
+  if (writeAsMap.dim(isl::dim::in) != 2 || writeAsMap.dim(isl::dim::out) != 1) {
+    LLVM_DEBUG(dbgs() << "Expect a write access to 1D array in a 2d nest!\n");
+    return false;
+  }
+
+  using namespace matchers;
+  auto _i = placeholder(ctx);
+  auto _ii = placeholder(ctx);
+  auto _j = placeholder(ctx);
+  auto _A = arrayPlaceholder();
+  auto _B = arrayPlaceholder();
+  auto _C = arrayPlaceholder();
+  auto psRead = allOf(access(_A, _i, _j), access(_B, _j), access(_C, _i));
+  auto psWrite = allOf(access(_C, _ii));
+  auto readMatches = match(reads, psRead);
+  auto writeMatches = match(writes, psWrite);
+
+  if (readMatches.size() != 1) {
+    LLVM_DEBUG(dbgs() << "readMatches.size() != 1\n");
+    LLVM_DEBUG(dbgs() << readMatches.size() << "\n");
+    LLVM_DEBUG(dbgs() << "reads : " << reads.to_str() << "\n");
+    LLVM_DEBUG(dbgs() << "Writes : " << writes.to_str() << "\n");
+    return false;
+  }
+  if (writeMatches.size() != 1) {
+    LLVM_DEBUG(dbgs() << "writeMatches.size() != 1\n");
+    LLVM_DEBUG(dbgs() << "reads : " << reads.to_str() << "\n");
+    LLVM_DEBUG(dbgs() << "Writes : " << writes.to_str() << "\n");
+    return false;
+  }
+
+  auto iSpaceCandidates = readMatches[0][_i].candidateSpaces();
+  auto jSpaceCandidates = readMatches[0][_j].candidateSpaces();
+  auto iiSpaceCandidates = writeMatches[0][_ii].candidateSpaces();
+
+  if (writeMatches[0][_ii].payload().inputDimPos_ ==
+      readMatches[0][_i].payload().inputDimPos_) {
+    LLVM_DEBUG(dbgs() << "Access to matrix is non transposed\n");
+    LLVM_DEBUG(dbgs() << "for (i\n");
+    LLVM_DEBUG(dbgs() << "  for(j\n");
+    LLVM_DEBUG(dbgs() << "    x[i] = ... A[i][otherDim]\n");
+    MVI.isTranspose = false;
+  }
+
+  if (writeMatches[0][_ii].payload().inputDimPos_ ==
+      readMatches[0][_j].payload().inputDimPos_) {
+    LLVM_DEBUG(dbgs() << "Access to matrix is transposed\n");
+    LLVM_DEBUG(dbgs() << "for (i\n");
+    LLVM_DEBUG(dbgs() << "  for(j\n");
+    LLVM_DEBUG(dbgs() << "    x[i] = ... A[otherDim][i]\n");
+    MVI.isTranspose = true;
+  }
+
+  if ((writeMatches[0][_ii].payload().inputDimPos_ !=
+       readMatches[0][_i].payload().inputDimPos_) &&
+      (writeMatches[0][_ii].payload().inputDimPos_ !=
+       readMatches[0][_j].payload().inputDimPos_)) {
+    return false;
+  }
+
+  MVI.A = getMemoryAccessFromTagged(s, schedule, iSpaceCandidates,
+                                    jSpaceCandidates, "r");
+  MVI.WriteToY = getMemoryAccessFromTagged(s, schedule, iiSpaceCandidates,
+                                           iiSpaceCandidates, "w");
+
+  MVI.ReadFromY = (MVI.isTranspose)
+                      ? getMemoryAccessFromTagged(s, schedule, jSpaceCandidates,
+                                                  jSpaceCandidates, "r")
+                      : getMemoryAccessFromTagged(s, schedule, iSpaceCandidates,
+                                                  iSpaceCandidates, "r");
+
+  MVI.X = (MVI.isTranspose)
+              ? getMemoryAccessFromTagged(s, schedule, iSpaceCandidates,
+                                          iSpaceCandidates, "r")
+              : getMemoryAccessFromTagged(s, schedule, jSpaceCandidates,
+                                          jSpaceCandidates, "r");
+  return true;
+}
+
+// is the patter matrix-vector like?
+static isl::schedule isGemvLikeLate(isl::schedule schedule, Scop &s) {
+
+  isl::schedule_node root = schedule.get_root();
+  
+   pGemv.flush();
+
+  auto hasGemvConditions = [&](isl::schedule_node band) {
+    isl::union_map schedule =
+        isl::union_map::from(band.band_get_partial_schedule());
+    if (schedule.n_map() != 1)
+      return false;
+    isl::map scheduleAsMap = isl::map::from_union_map(schedule);
+    if (scheduleAsMap.dim(isl::dim::out) != 2)
+      return false;
+    return true;
+  };
+
+  // check if the access patterns are gemv like.
+  auto containsGemv = [&](isl::schedule_node band) {
+    MatVecInfoTy MVI;
+    isl::map scheduleAsMap = isl::map::from_union_map(
+        isl::union_map::from(band.band_get_partial_schedule()));
+    if (!checkAccessGemvStmt(s, scheduleAsMap, MVI))
+      return false;
+    pGemv.detected++;
+    pGemv.patternTys.push_back(MVI);
+    return true;
+  };
+
+  auto hasNotFired = [&](isl::schedule_node band) {
+    if (!band.has_parent())
+      return true;
+    auto maybeMark = band.parent();
+    if (isl_schedule_node_get_type(maybeMark.get()) != isl_schedule_node_mark)
+      return true;
+    auto markId = maybeMark.mark_get_id().to_str();
+    markId = markId.substr(0, markId.find("@"));
+    if (markId.compare("gemv") == 0)
+      return false;
+    else
+      return true;
+  };
+
+  isl::schedule_node gemvBody, subtree;
+  auto matcherGemv = [&]() {
+    using namespace matchers;
+    // clang-format off
+    return band(_and(hasNotFired,
+                     hasGemvConditions, 
+                     containsGemv), gemvBody, anyTree(subtree));
+    // clang-format on
+  }();
+
+  // rebuild gemm pattern with a fixed tile size,
+  // needed by the cim device.
+  auto builderGemv = builders::ScheduleNodeBuilder();
+  {
+    using namespace builders;
+
+    auto computeScheduleTile = [&]() {
+      auto descr = BandDescriptor(gemvBody);
+      auto tiledSchedule = tile_node(gemvBody, TILE_FACTOR_CIM_DEVICE);
+      descr.partialSchedule = tiledSchedule.first;
+      return descr;
+    };
+    auto computeSchedulePoint = [&]() {
+      auto descr = BandDescriptor(gemvBody);
+      auto tiledSchedule = tile_node(gemvBody, TILE_FACTOR_CIM_DEVICE);
+      descr.partialSchedule = tiledSchedule.second;
+      return descr;
+    };
+    auto marker = [&]() {
+      return isl::id::alloc(s.getIslCtx(), "gemv", &pGemv);
+    };
+    builderGemv = 
+      band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
+  }
+
+  root = replaceDFSPreorderOnce(root.child(0), matcherGemv, builderGemv);
+  return root.root().get_schedule();
+}
+
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       Scop &s) {
 
-  schedule = isGemmLikeLate(schedule, s);
-  schedule = fuseTwoConsecutiveGemmIfNotTiled(schedule, s);
+  //schedule = isGemmLikeLate(schedule, s);
+  //schedule = fuseTwoConsecutiveGemmIfNotTiled(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
+  }
+  schedule = isGemvLikeLate(schedule, s);
+  if (lookUpScheduleTree(schedule, "gemv")) {
+    LLVM_DEBUG(dbgs() << "Matchers: GEMV pattern detected!\n");
   }
   return schedule;
 }
@@ -2821,8 +3006,7 @@ static isl::schedule isGemmLikeEarly(isl::schedule schedule, Scop &s) {
 static isl::schedule optimizeScheduleWithMatchersEarly(isl::schedule schedule,
                                                        Scop &s) {
 
-  assert(
-      0 &&
+  assert(0 &&
       "Use optimizeScheduleWithMatchersLate, this flow is not available atm");
   schedule = isGemmLikeEarly(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
