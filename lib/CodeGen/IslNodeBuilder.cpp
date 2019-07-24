@@ -482,14 +482,15 @@ isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
 ///
 /// If we cannot statically compute the array bounds the
 /// function returns (-1, -1)
-std::pair<isl::val, isl::val> IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
+std::pair<isl::val, isl::val>
+IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
 
-  
-  assert(static_cast<size_t>(dim) < extent.dim(isl::dim::set) && "must be less!\n");
+  assert(static_cast<size_t>(dim) < extent.dim(isl::dim::set) &&
+         "must be less!\n");
 
   isl::pw_aff lower_bound = extent.dim_min(dim);
   isl::pw_aff upper_bound = extent.dim_max(dim);
-  
+
   assert(lower_bound.n_piece() == 1 && "expect single piece");
   assert(upper_bound.n_piece() == 1 && "expect single piece");
 
@@ -515,31 +516,26 @@ std::pair<isl::val, isl::val> IslNodeBuilder::getDimensionBounds(isl::ctx ctx, i
 /// -> 1024 as upper bound for dimension i
 /// -> 0 as lower bound for dimension j
 /// -> 2048 as upper bound for dimension j
-std::tuple<isl::val, isl::val, isl::val, isl::val> 
+std::tuple<isl::val, isl::val, isl::val, isl::val>
 IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
 
   isl::ctx ctx = Array->getScop().getIslCtx();
   isl::val negone = isl::val::negone(ctx);
 
   if (!Array->isArrayKind()) {
-    return std::make_tuple(
-      negone, negone,
-      negone, negone);
+    return std::make_tuple(negone, negone, negone, negone);
   }
 
   size_t dims = Array->getNumberOfDimensions();
   if (dims != 2) {
     LLVM_DEBUG(dbgs() << "Expect 2d arrays only!\n");
-    return std::make_tuple(
-      negone, negone,
-      negone, negone);
+    return std::make_tuple(negone, negone, negone, negone);
   }
-  
+
   isl::set extent = getArrayExtent(Array);
   if (extent.is_empty()) {
     LLVM_DEBUG(dbgs() << "Cannot statically compute the array bounds!\n");
-    return std::make_tuple(negone, negone,
-                           negone, negone);
+    return std::make_tuple(negone, negone, negone, negone);
   }
 
   std::pair<isl::val, isl::val> dims_i = getDimensionBounds(ctx, extent, 0);
@@ -548,28 +544,24 @@ IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
   if (dims_i.first.eq(negone) || dims_i.second.eq(negone) ||
       dims_j.first.eq(negone) || dims_i.second.eq(negone)) {
     LLVM_DEBUG(dbgs() << "Cannot statically compute array bounds!\n");
-    return std::make_tuple(
-      negone, negone, 
-      negone, negone);
+    return std::make_tuple(negone, negone, negone, negone);
   }
 
-  return std::make_tuple(dims_i.first, dims_i.second,
-                         dims_j.first, dims_j.second);
-      
+  return std::make_tuple(dims_i.first, dims_i.second, dims_j.first,
+                         dims_j.second);
 }
 
 void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
 
-  //ScopArrayInfo *SAI_A =
+  // ScopArrayInfo *SAI_A =
   //  const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());
-  //ScopArrayInfo *SAI_B =
+  // ScopArrayInfo *SAI_B =
   //  const_cast<ScopArrayInfo *>(MMI.B->getLatestScopArrayInfo());
   ScopArrayInfo *SAI_C =
-    const_cast<ScopArrayInfo *>(MMI.WriteToC->getLatestScopArrayInfo());
-
+      const_cast<ScopArrayInfo *>(MMI.WriteToC->getLatestScopArrayInfo());
 
   // array bounds for C.
-  auto C_bounds = getArrayBounds(SAI_C);  
+  auto C_bounds = getArrayBounds(SAI_C);
   LLVM_DEBUG(dbgs() << "dim: " << std::get<0>(C_bounds).to_str() << "\n");
   LLVM_DEBUG(dbgs() << "dim: " << std::get<1>(C_bounds).to_str() << "\n");
   LLVM_DEBUG(dbgs() << "dim: " << std::get<2>(C_bounds).to_str() << "\n");
