@@ -2324,14 +2324,53 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
     else
       return true;
   };
+/*
+  // This callback always returns true. The only purpose is to
+  // check if tiling is profitable for the CIM device.
+  auto needToTile = [&](isl::schedule_node band) {
+    auto schedule = band.get_prefix_schedule_union_map();
+    schedule = schedule.intersect_domain(s.getDomains());
+    schedule.foreach_map([&](isl::map m) {
+      auto max_i = m.domain().dim_max(0);
+      auto max_j = m.domain().dim_max(1);
+      auto max_k = m.domain().dim_max(2);
 
+      isl::val val_max_i;
+      isl::val val_max_j;
+      isl::val val_max_k;
+      max_i.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+        val_max_i = a.get_constant_val();
+        return isl_stat_ok;
+      });
+      max_j.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+        val_max_j = a.get_constant_val();
+        return isl_stat_ok;
+      });
+      max_k.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+        val_max_k = a.get_constant_val();
+        return isl_stat_ok;
+      });
+      LLVM_DEBUG(dbgs() << val_max_i.to_str() << "\n");
+      LLVM_DEBUG(dbgs() << val_max_j.to_str() << "\n");
+      LLVM_DEBUG(dbgs() << val_max_k.to_str() << "\n");
+      if (std::stoi(val_max_i.to_str()) < TILE_FACTOR_CIM_DEVICE ||
+          std::stoi(val_max_j.to_str()) < TILE_FACTOR_CIM_DEVICE ||
+          std::stoi(val_max_k.to_str()) < TILE_FACTOR_CIM_DEVICE) {
+        LLVM_DEBUG(dbgs() << "set to false\n");
+      }
+      return isl_stat_ok;
+    });
+    return true;
+  }; 
+*/
   // look for the gemm pattern
   isl::schedule_node gemm_body;
   auto matcherGemm = [&]() {
     using namespace matchers;
     // clang-format off
     return
-      band(_and(hasNotFired, hasGemmConditions, containsMatrMul), gemm_body,
+      band(_and(
+          hasNotFired, hasGemmConditions, containsMatrMul/*, needToTile*/), gemm_body,
         leaf());
     // clang-format on
   }();
@@ -2343,33 +2382,6 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
   auto builderGemm = builders::ScheduleNodeBuilder();
   {
     using namespace builders;
-
-    // avoid tiling if the array dimensions are less
-    // than the tile size.
-    // FIXME: What if the dimension of the array are not
-    // known?
-    bool tile = [&]() {
-      auto schedule = gemm_body.get_prefix_schedule_union_map();
-      schedule = schedule.intersect_domain(s.getDomains());
-
-      int val_as_int = 0;
-
-      schedule.foreach_map([&](isl::map m) {
-        auto max = m.range().dim_max(0);
-        isl::val val_max;
-        if (max.n_piece() != 1)
-          return isl_stat_ok;
-        max.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
-          val_max = a.get_constant_val();
-          return isl_stat_ok;
-        });
-        val_as_int = std::stoi(val_max.to_str());
-        return isl_stat_ok;
-      });
-      if (val_as_int < TILE_FACTOR_CIM_DEVICE)
-        return false;
-      return true;
-    }();
 
     auto computeScheduleTile = [&]() {
       auto descr = BandDescriptor(gemm_body);
@@ -2386,13 +2398,8 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, Scop &s) {
     auto marker = [&]() {
       return isl::id::alloc(s.getIslCtx(), "gemm", &pGemm);
     };
-    auto recomputeOriginalSchedule = [&]() {
-      auto descr = BandDescriptor(gemm_body);
-      return descr;
-    };
-    builderGemm = (tile) ? band(computeScheduleTile,
-                                mark(marker, band(computeSchedulePoint)))
-                         : mark(marker, band(recomputeOriginalSchedule));
+    builderGemm = 
+      band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
   }
 
   // wrapPatternDFSPreorder(s.getIslCtx(), &pGemm, "gemm", root.child(0),
