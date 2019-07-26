@@ -315,7 +315,7 @@ STATISTIC(PrevectOpts, "Number of strip-mining for prevectorization applied");
 STATISTIC(MatMulOpts,
           "Number of matrix multiplication patterns detected and optimized");
 
-constexpr int TILE_FACTOR_CIM_DEVICE = 2048;
+constexpr int TILE_FACTOR_CIM_DEVICE = 256;
 
 /// Create an isl::union_set, which describes the isolate option based on
 /// IsolateDomain.
@@ -2259,10 +2259,46 @@ tile_node(isl::schedule_node node, int tileSize) {
 
 // fw. decl.
 isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule, const Scop &s);
+
+static isl::schedule_node add_cim_start_up(isl::schedule_node node) {
+
+  isl::space space;
+  isl::union_set domain;
+  isl::schedule_node graft;
+
+  space = isl::space(node.get_ctx(), 0 ,0);
+  space = space.set_tuple_name(isl::dim::set, "cim_init");  
+  domain = isl::union_set(isl::set::universe(space));
+  graft = isl::schedule_node::from_domain(domain);
+  node = node.graft_before(graft);
+  return node;
+}
+
+static isl::schedule_node add_cim_tear_down(isl::schedule_node node) {
+
+  isl::space space;
+  isl::union_set domain;
+  isl::schedule_node graft;
+
+  space = isl::space(node.get_ctx(), 0 ,0);
+  space = space.set_tuple_name(isl::dim::set, "cim_tear_down");
+  domain = isl::union_set(isl::set::universe(space));
+  graft = isl::schedule_node::from_domain(domain);
+  node = node.graft_after(graft);
+  return node;
+}
+
 // is the pattern gemm-like?
 isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic tac) {
 
-  isl::schedule_node root = schedule.get_root();
+  isl::schedule_node root = schedule.get_root().child(0);
+
+  // add cim init
+  root = add_cim_start_up(root);
+  // add cim tear down
+  root = add_cim_tear_down(root);
+
+  root = root.root();
 
   // see ScheduleOptimizer.h
   pGemm.flush();
@@ -3180,7 +3216,7 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl::schedule NewSchedule;
 
-  Tactic tac = Tactic::FUSION;
+  Tactic tac = Tactic::TILING;
 
   if (MatcherOptLate) {
     NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S, tac);

@@ -553,23 +553,48 @@ IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
 
 void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
 
-  // ScopArrayInfo *SAI_A =
-  //  const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());
-  // ScopArrayInfo *SAI_B =
-  //  const_cast<ScopArrayInfo *>(MMI.B->getLatestScopArrayInfo());
+  ScopArrayInfo *SAI_A =
+    const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());
+  ScopArrayInfo *SAI_B =
+    const_cast<ScopArrayInfo *>(MMI.B->getLatestScopArrayInfo());
   ScopArrayInfo *SAI_C =
       const_cast<ScopArrayInfo *>(MMI.WriteToC->getLatestScopArrayInfo());
 
   // array bounds for C.
-  auto C_bounds = getArrayBounds(SAI_C);
-  LLVM_DEBUG(dbgs() << "dim: " << std::get<0>(C_bounds).to_str() << "\n");
-  LLVM_DEBUG(dbgs() << "dim: " << std::get<1>(C_bounds).to_str() << "\n");
-  LLVM_DEBUG(dbgs() << "dim: " << std::get<2>(C_bounds).to_str() << "\n");
-  LLVM_DEBUG(dbgs() << "dim: " << std::get<3>(C_bounds).to_str() << "\n");
+  //auto C_bounds = getArrayBounds(SAI_C);
+  //LLVM_DEBUG(dbgs() << "dim: " << std::get<0>(C_bounds).to_str() << "\n");
+  //LLVM_DEBUG(dbgs() << "dim: " << std::get<1>(C_bounds).to_str() << "\n");
+  //LLVM_DEBUG(dbgs() << "dim: " << std::get<2>(C_bounds).to_str() << "\n");
+  //LLVM_DEBUG(dbgs() << "dim: " << std::get<3>(C_bounds).to_str() << "\n");
 
   // get the base pointer for C.
+  //Value *C_base_pointer = SAI_C->getBasePtr();
+  //C_base_pointer->dump();
+
+  Value *A_base_pointer = SAI_A->getBasePtr();
+  Value *B_base_pointer = SAI_B->getBasePtr();
   Value *C_base_pointer = SAI_C->getBasePtr();
-  C_base_pointer->dump();
+
+  // FIXME: What about alpha and beta
+  // are we interested?
+  // Can we define the interface for the GEMM call?
+  // FIXME: get operand type i.e., float or double.
+  
+  const char *Name = "cim_gemm_double";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(Name);
+
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getInt8PtrTy());
+    Args.push_back(Builder.getInt8PtrTy());
+    Args.push_back(Builder.getInt8PtrTy());
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+  
+  Builder.CreateCall(F, {A_base_pointer, B_base_pointer, C_base_pointer});
 }
 
 void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
