@@ -1178,6 +1178,61 @@ void IslNodeBuilder::createBlock(__isl_take isl_ast_node *Block) {
   isl_ast_node_list_free(List);
 }
 
+void IslNodeBuilder::insert_cim_init() {
+
+  const char *name = "cim_init";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(name);
+
+  Value *Dummy = ConstantFP::get(Builder.getFloatTy(), 1.0); 
+ 
+  if (!F) {
+    GlobalValue::LinkageTypes linkage = Function::ExternalLinkage;  
+    std::vector<Type *> args;
+    args.push_back(Builder.getFloatTy());
+
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), args, false); 
+    F = Function::Create(Ty, linkage, name, M);
+  }
+  Builder.CreateCall(F, {Dummy});
+}
+
+void IslNodeBuilder::insert_cim_tear_down() {
+
+  const char *name = "cim_tear_down";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(name);
+
+  Value *Dummy = ConstantFP::get(Builder.getFloatTy(), 1.0);
+
+  if (!F) {
+    GlobalValue::LinkageTypes linkage = Function::ExternalLinkage;
+    std::vector<Type *> args;
+    args.push_back(Builder.getFloatTy());
+
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), args, false);
+    F = Function::Create(Ty, linkage, name, M);
+  }
+  Builder.CreateCall(F, {Dummy});
+}
+
+bool IslNodeBuilder::are_cim_related(__isl_keep isl_ast_node *User) {
+
+  isl_ast_expr *Expr = isl_ast_node_user_get_expr(User);
+  std::string expr_as_string = 
+    std::string(isl_ast_expr_to_str(Expr));
+  isl_ast_expr_free(Expr);
+  if (expr_as_string.find("cim_init") != std::string::npos) {
+    insert_cim_init();
+    return true;
+  }
+  if (expr_as_string.find("cim_tear_down") != std::string::npos) {
+    insert_cim_tear_down();
+    return true;
+  } 
+  return false;
+}
+
 void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
   switch (isl_ast_node_get_type(Node)) {
   case isl_ast_node_error:
@@ -1192,6 +1247,10 @@ void IslNodeBuilder::create(__isl_take isl_ast_node *Node) {
     createIf(Node);
     return;
   case isl_ast_node_user:
+    if (are_cim_related(Node)) {
+      isl_ast_node_free(Node); 
+      return;
+    }
     createUser(Node);
     return;
   case isl_ast_node_block:
