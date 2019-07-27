@@ -2260,7 +2260,7 @@ tile_node(isl::schedule_node node, int tileSize) {
 // fw. decl.
 isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule, const Scop &s);
 
-static isl::schedule_node add_cim_start_up(isl::schedule_node node) {
+static isl::schedule_node addCimStartUp(isl::schedule_node node) {
 
   isl::space space;
   isl::union_set domain;
@@ -2274,7 +2274,7 @@ static isl::schedule_node add_cim_start_up(isl::schedule_node node) {
   return node;
 }
 
-static isl::schedule_node add_cim_allocate_shared_memory(
+static isl::schedule_node addCimAllocateSharedMemory(
   isl::schedule_node node, int bytes) {
 
   isl::space space;
@@ -2295,7 +2295,7 @@ static isl::schedule_node add_cim_allocate_shared_memory(
 
 }
 
-static isl::schedule_node add_cim_tear_down(isl::schedule_node node) {
+static isl::schedule_node addCimTearDown(isl::schedule_node node) {
 
   isl::space space;
   isl::union_set domain;
@@ -2849,6 +2849,215 @@ static isl::schedule isGemvLikeLate(isl::schedule schedule, Scop &s) {
   return root.root().get_schedule();
 }
 
+template<class T, class...>
+struct are_same : std::true_type
+{};
+
+template<class T, class U, class... TT>
+struct are_same<T, U, TT...>
+    : std::integral_constant<bool, std::is_same<T,U>{} && are_same<T, TT...>{}>
+{};
+
+template <typename T, typename arg, typename... args>
+void do_for(T f, arg first, args... rest) {
+
+  f(first);
+  do_for(f, rest...);
+}
+
+template <typename T>
+void do_for(T f) {}
+
+/// Return the array extent.
+static isl::set getArrayExtent(const ScopArrayInfo *Array, const Scop &S) {
+  unsigned NumDims = Array->getNumberOfDimensions();
+
+  if (Array->getNumberOfDimensions() == 0)
+    return isl::set::universe(Array->getSpace());
+
+  //XXX
+  isl::union_map Accesses = 
+    const_cast<Scop&>(S).getAccesses(const_cast<ScopArrayInfo*>(Array));
+  isl::union_set AccessUSet = Accesses.range();
+  AccessUSet = AccessUSet.coalesce();
+  AccessUSet = AccessUSet.detect_equalities();
+  AccessUSet = AccessUSet.coalesce();
+
+  if (AccessUSet.is_empty())
+    return isl::set::empty(Array->getSpace());
+
+  isl::set AccessSet = AccessUSet.extract_set(Array->getSpace());
+
+  isl::local_space LS = isl::local_space(Array->getSpace());
+
+  isl::pw_aff Val = isl::aff::var_on_domain(LS, isl::dim::set, 0);
+  isl::pw_aff OuterMin = AccessSet.dim_min(0);
+  isl::pw_aff OuterMax = AccessSet.dim_max(0);
+  OuterMin = OuterMin.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+  OuterMax = OuterMax.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+  OuterMin = OuterMin.set_tuple_id(isl::dim::in, Array->getBasePtrId());
+  OuterMax = OuterMax.set_tuple_id(isl::dim::in, Array->getBasePtrId());
+
+  isl::set Extent = isl::set::universe(Array->getSpace());
+
+  Extent = Extent.intersect(OuterMin.le_set(Val));
+  Extent = Extent.intersect(OuterMax.ge_set(Val));
+
+  for (unsigned i = 1; i < NumDims; ++i)
+    Extent = Extent.lower_bound_si(isl::dim::set, i, 0);
+
+  for (unsigned i = 0; i < NumDims; ++i) {
+    isl::pw_aff PwAff = Array->getDimensionSizePw(i);
+
+    // isl_pw_aff can be NULL for zero dimension. Only in the case of a
+    // Fortran array will we have a legitimate dimension.
+    if (PwAff.is_null()) {
+      assert(i == 0 && "invalid dimension isl_pw_aff for nonzero dimension");
+      continue;
+    }
+    isl::pw_aff Val = isl::aff::var_on_domain(
+        isl::local_space(Array->getSpace()), isl::dim::set, i);
+    PwAff = PwAff.add_dims(isl::dim::in, Val.dim(isl::dim::in));
+    PwAff = PwAff.set_tuple_id(isl::dim::in, Val.get_tuple_id(isl::dim::in));
+    isl::set Set = PwAff.gt_set(Val);
+    Extent = Set.intersect(Extent);
+  }
+
+  return Extent;
+}
+
+/// Return lower and upper bound for a given dimension
+/// of a given array.
+/// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
+/// getDimensionBounds(A, 0) returns:
+/// -> 0 as lower bound
+/// -> 1024 as upper bound
+///
+/// If we cannot statically compute the array bounds the
+/// function returns (-1, -1)
+static std::pair<isl::val, isl::val>
+getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
+
+  assert(static_cast<size_t>(dim) < extent.dim(isl::dim::set) &&
+         "must be less!\n");
+
+  isl::pw_aff lower_bound = extent.dim_min(dim);
+  isl::pw_aff upper_bound = extent.dim_max(dim);
+
+  assert(lower_bound.n_piece() == 1 && "expect single piece");
+  assert(upper_bound.n_piece() == 1 && "expect single piece");
+
+  isl::val lower_bound_val;
+  isl::val upper_bound_val;
+  lower_bound.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+    lower_bound_val = a.get_constant_val();
+    return isl_stat_ok;
+  });
+  upper_bound.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+    upper_bound_val = a.get_constant_val();
+    return isl_stat_ok;
+  });
+
+  upper_bound_val = upper_bound_val.add(isl::val::one(ctx));
+  return std::make_pair(lower_bound_val, upper_bound_val);
+}
+
+
+
+/// Get the dimensions bounds for a 2d array.
+/// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
+/// getArrayBounds(A) returns:
+/// -> 0 as lower bound for dimension i
+/// -> 1024 as upper bound for dimension i
+/// -> 0 as lower bound for dimension j
+/// -> 2048 as upper bound for dimension j
+static std::tuple<isl::val, isl::val, isl::val, isl::val> 
+getArrayBounds(const ScopArrayInfo *Array, const Scop &S) {
+
+  isl::ctx ctx = Array->getScop().getIslCtx();
+  isl::val negone = isl::val::negone(ctx);
+
+  if (!Array->isArrayKind()) {
+    return std::make_tuple(negone, negone, negone, negone);
+  }
+
+  size_t dims = Array->getNumberOfDimensions();
+  if (dims != 2) {
+    LLVM_DEBUG(dbgs() << "Expect 2d arrays only!\n");
+    return std::make_tuple(negone, negone, negone, negone);
+  }
+
+  isl::set extent = getArrayExtent(Array, S);
+  if (extent.is_empty()) {
+    LLVM_DEBUG(dbgs() << "Cannot statically compute the array bounds!\n");
+    assert(0 && "Cannot statically compute array bounds!");
+    return std::make_tuple(negone, negone, negone, negone);
+  }
+
+  std::pair<isl::val, isl::val> dims_i = getDimensionBounds(ctx, extent, 0);
+  std::pair<isl::val, isl::val> dims_j = getDimensionBounds(ctx, extent, 1);
+
+  if (dims_i.first.eq(negone) || dims_i.second.eq(negone) ||
+      dims_j.first.eq(negone) || dims_i.second.eq(negone)) {
+    LLVM_DEBUG(dbgs() << "Cannot statically compute array bounds!\n");
+    assert(0 && "Cannot statically compute array bounds!");
+    return std::make_tuple(negone, negone, negone, negone);
+  }
+
+  return std::make_tuple(dims_i.first, dims_i.second, dims_j.first,
+                         dims_j.second);
+}
+
+static int getBytesForArray(const ScopArrayInfo *sai, const Scop &s) {
+
+  auto bounds = getArrayBounds(sai, s);
+
+  isl::val dim_i = std::get<1>(bounds).sub(std::get<0>(bounds)); 
+  isl::val dim_j = std::get<3>(bounds).sub(std::get<2>(bounds));
+  dim_i = dim_i.mul(dim_j);
+
+  int total_elements = std::stoi(dim_i.to_str());  
+  int size_element = sai->getElemSizeInBytes();
+  return total_elements * size_element;
+
+}
+
+static int getBytesForVector(const ScopArrayInfo *sai, const Scop &s) {
+
+  assert(0);
+} 
+
+template <typename T, typename... Args>
+static int computeSharedMemorySize(const Scop &s, const T arg, const Args... args) {
+
+  static_assert(are_same<MemoryAccess*, Args...>{}, "must be of type MemoryAccess*");
+
+  std::vector<MemoryAccess*> mem_accesses{};
+  mem_accesses.push_back(arg);
+
+  do_for([&](MemoryAccess * arg) {
+    mem_accesses.push_back(arg);
+  }, args...);
+
+  int bytes = 0;
+
+  for (const auto &mem_acc : mem_accesses) {
+    ScopArrayInfo *sai =
+      const_cast<ScopArrayInfo*>(mem_acc->getLatestScopArrayInfo());
+    int dims = sai->getNumberOfDimensions();
+    switch (dims) {
+      case 1:
+        bytes+= getBytesForVector(sai,s); break;
+      case 2:
+        bytes += getBytesForArray(sai,s); break;
+      default: assert(0);
+    }
+  }
+
+  return bytes;
+}
+  
+
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       const Scop &s,
                                                       const Tactic &tac) {
@@ -2860,9 +3069,16 @@ static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
     // used to allocate the shared memory needed by the CIM
     // device.
     isl::schedule_node root = schedule.get_root().child(0);    
-    root = add_cim_start_up(root);
-    root = add_cim_allocate_shared_memory(root, pGemm.bytes);
-    root = add_cim_tear_down(root);
+    root = addCimStartUp(root);
+
+    // FIXME What if we detect multiple gemm patter?
+    int bytes = 
+      computeSharedMemorySize(s, pGemm.patternTys[0].A, 
+                                 pGemm.patternTys[0].B, 
+                                 pGemm.patternTys[0].WriteToC);
+
+    root = addCimAllocateSharedMemory(root, bytes);
+    root = addCimTearDown(root);
     schedule = root.root().get_schedule();
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }

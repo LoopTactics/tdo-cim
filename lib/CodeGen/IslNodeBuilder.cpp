@@ -418,6 +418,7 @@ void IslNodeBuilder::insertDummy() {
 */
 
 /// Return the array extent.
+/*
 isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
   unsigned NumDims = Array->getNumberOfDimensions();
 
@@ -472,7 +473,7 @@ isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
 
   return Extent;
 }
-
+*/
 /// Return lower and upper bound for a given dimension
 /// of a given array.
 /// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
@@ -482,6 +483,7 @@ isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
 ///
 /// If we cannot statically compute the array bounds the
 /// function returns (-1, -1)
+/*
 std::pair<isl::val, isl::val>
 IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
 
@@ -508,7 +510,7 @@ IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
   upper_bound_val = upper_bound_val.add(isl::val::one(ctx));
   return std::make_pair(lower_bound_val, upper_bound_val);
 }
-
+*/
 /// Get the dimensions bounds for a 2d array.
 /// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
 /// getArrayBounds(A) returns:
@@ -516,6 +518,7 @@ IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
 /// -> 1024 as upper bound for dimension i
 /// -> 0 as lower bound for dimension j
 /// -> 2048 as upper bound for dimension j
+/*
 std::tuple<isl::val, isl::val, isl::val, isl::val>
 IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
 
@@ -550,6 +553,7 @@ IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
   return std::make_tuple(dims_i.first, dims_i.second, dims_j.first,
                          dims_j.second);
 }
+*/
 
 void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
 
@@ -1256,6 +1260,7 @@ void IslNodeBuilder::insert_cim_allocate_shared_memory(int bytes) {
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
   Function *F = M->getFunction(Name);
   
+  // FIXME: make me int.
   Value *Bytes = ConstantFP::get(Builder.getFloatTy(), float(bytes));
 
   if (!F) {
