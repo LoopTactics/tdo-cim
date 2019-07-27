@@ -618,6 +618,15 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
     auto *BasePtr = static_cast<Value *>(isl_id_get_user(Id));
     Annotator.addInterIterationAliasFreeBasePtr(BasePtr);
   }
+  if (strcmp(isl_id_get_name(Id), "__cim_allocate_") == 0) {
+    auto *p_bytes = static_cast<int *>(isl_id_get_user(Id));
+    int bytes = *p_bytes;
+    delete p_bytes;
+    insert_cim_allocate_shared_memory(bytes);
+    isl_ast_node_free(Child);
+    isl_id_free(Id);
+    return;
+  }
   if (strcmp(isl_id_get_name(Id), "gemm_init") == 0) {
     auto p = static_cast<Payload<MatMulInfoTyExtended> *>(isl_id_get_user(Id));
     insertCimGemm(p->patternTys[p->current]);
@@ -1205,40 +1214,59 @@ void IslNodeBuilder::createBlock(__isl_take isl_ast_node *Block) {
 
 void IslNodeBuilder::insert_cim_init() {
 
-  const char *name = "cim_init";
+  const char *Name = "cim_init";
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
-  Function *F = M->getFunction(name);
+  Function *F = M->getFunction(Name);
 
   Value *Dummy = ConstantFP::get(Builder.getFloatTy(), 1.0); 
  
   if (!F) {
-    GlobalValue::LinkageTypes linkage = Function::ExternalLinkage;  
-    std::vector<Type *> args;
-    args.push_back(Builder.getFloatTy());
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;  
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getFloatTy());
 
-    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), args, false); 
-    F = Function::Create(Ty, linkage, name, M);
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false); 
+    F = Function::Create(Ty, Linkage, Name, M);
   }
   Builder.CreateCall(F, {Dummy});
 }
 
 void IslNodeBuilder::insert_cim_tear_down() {
 
-  const char *name = "cim_tear_down";
+  const char *Name = "cim_tear_down";
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
-  Function *F = M->getFunction(name);
+  Function *F = M->getFunction(Name);
 
   Value *Dummy = ConstantFP::get(Builder.getFloatTy(), 1.0);
 
   if (!F) {
-    GlobalValue::LinkageTypes linkage = Function::ExternalLinkage;
-    std::vector<Type *> args;
-    args.push_back(Builder.getFloatTy());
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getFloatTy());
 
-    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), args, false);
-    F = Function::Create(Ty, linkage, name, M);
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
+    F = Function::Create(Ty, Linkage, Name, M);
   }
   Builder.CreateCall(F, {Dummy});
+}
+
+void IslNodeBuilder::insert_cim_allocate_shared_memory(int bytes) {
+
+  const char *Name = "cim_allocate_shared_memory";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(Name);
+  
+  Value *Bytes = ConstantFP::get(Builder.getFloatTy(), float(bytes));
+
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getFloatTy());
+
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+  Builder.CreateCall(F, {Bytes});
 }
 
 bool IslNodeBuilder::are_cim_related(__isl_keep isl_ast_node *User) {
@@ -1253,6 +1281,11 @@ bool IslNodeBuilder::are_cim_related(__isl_keep isl_ast_node *User) {
   }
   if (expr_as_string.find("cim_tear_down") != std::string::npos) {
     insert_cim_tear_down();
+    return true;
+  }
+  if (expr_as_string.find("cim_allocate_shared_memory") != std::string::npos) {
+    // We insert the function when we hit the mark
+    // node. Here we simply return. 
     return true;
   } 
   return false;

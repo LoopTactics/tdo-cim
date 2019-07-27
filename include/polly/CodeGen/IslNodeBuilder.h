@@ -460,6 +460,7 @@ private:
 
   // void insertDummy();
   bool are_cim_related(__isl_keep isl_ast_node *User);
+  void insert_cim_allocate_shared_memory(int bytes);
   void insert_cim_tear_down();
   void insert_cim_init();
   void insertCimGemm(MatMulInfoTyExtended &MMI);

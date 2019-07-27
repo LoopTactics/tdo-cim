@@ -80,6 +80,9 @@ template <typename T> class Payload {
 public:
   int detected = 0;
   int current = 0;
+  // total size in bytes
+  // to be allocated on the shared memory.
+  int bytes = 0;
   std::vector<T> patternTys;
 
   void flush() {

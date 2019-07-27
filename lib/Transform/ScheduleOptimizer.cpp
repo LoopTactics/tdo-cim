@@ -2274,6 +2274,27 @@ static isl::schedule_node add_cim_start_up(isl::schedule_node node) {
   return node;
 }
 
+static isl::schedule_node add_cim_allocate_shared_memory(
+  isl::schedule_node node, int bytes) {
+
+  isl::space space;
+  isl::union_set domain;
+  isl::schedule_node graft;
+
+  space = isl::space(node.get_ctx(), 0 ,0);
+  space = space.set_tuple_name(isl::dim::set, "cim_allocate_shared_memory");  
+  domain = isl::union_set(isl::set::universe(space));
+  graft = isl::schedule_node::from_domain(domain);
+  int *p_bytes = new int;
+  *p_bytes = bytes;
+  graft = graft.child(0).
+    insert_mark(isl::id::alloc(node.get_ctx(), "__cim_allocate_", p_bytes));
+  graft = graft.parent();
+  node = node.graft_before(graft);
+  return node; 
+
+}
+
 static isl::schedule_node add_cim_tear_down(isl::schedule_node node) {
 
   isl::space space;
@@ -2291,14 +2312,7 @@ static isl::schedule_node add_cim_tear_down(isl::schedule_node node) {
 // is the pattern gemm-like?
 isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic tac) {
 
-  isl::schedule_node root = schedule.get_root().child(0);
-
-  // add cim init
-  root = add_cim_start_up(root);
-  // add cim tear down
-  root = add_cim_tear_down(root);
-
-  root = root.root();
+  isl::schedule_node root = schedule.get_root();
 
   // see ScheduleOptimizer.h
   pGemm.flush();
@@ -2840,8 +2854,16 @@ static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       const Tactic &tac) {
 
   schedule = isGemmLikeLate(schedule, s, tac);
-  //schedule = fuseTwoConsecutiveGemmIfNotTiled(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
+    // insert cim init and tear_down only if  
+    // we detect the gemm pattern. We also graft a subtree
+    // used to allocate the shared memory needed by the CIM
+    // device.
+    isl::schedule_node root = schedule.get_root().child(0);    
+    root = add_cim_start_up(root);
+    root = add_cim_allocate_shared_memory(root, pGemm.bytes);
+    root = add_cim_tear_down(root);
+    schedule = root.root().get_schedule();
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }
 /*
