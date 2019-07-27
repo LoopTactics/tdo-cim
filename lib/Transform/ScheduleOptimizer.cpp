@@ -3056,7 +3056,20 @@ static int computeSharedMemorySize(const Scop &s, const T arg, const Args... arg
 
   return bytes;
 }
-  
+
+// This will likely change in the near future.
+// I really do not like to have this static variable
+// pGemm. Another approach would be to allocate the 
+// MMI structs with new and then walk the tree to collect
+// the info you want.
+static int computeSharedMemorySizeForGemm(const Scop &s) {
+
+  int bytes = 0;
+  for (auto const &MMI : pGemm.patternTys) {
+    bytes += computeSharedMemorySize(s, MMI.A, MMI.B, MMI.WriteToC);
+  }
+  return bytes;
+}
 
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       const Scop &s,
@@ -3071,11 +3084,8 @@ static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
     isl::schedule_node root = schedule.get_root().child(0);    
     root = addCimStartUp(root);
 
-    // FIXME What if we detect multiple gemm patter?
     int bytes = 
-      computeSharedMemorySize(s, pGemm.patternTys[0].A, 
-                                 pGemm.patternTys[0].B, 
-                                 pGemm.patternTys[0].WriteToC);
+      computeSharedMemorySizeForGemm(s);
 
     root = addCimAllocateSharedMemory(root, bytes);
     root = addCimTearDown(root);
