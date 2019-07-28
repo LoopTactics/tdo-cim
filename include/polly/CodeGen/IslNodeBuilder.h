@@ -463,12 +463,15 @@ private:
   void insert_cim_allocate_shared_memory(int bytes);
   void insert_cim_tear_down();
   void insert_cim_init();
-  void insertCimGemm(MatMulInfoTyExtended &MMI);
-  isl::set getArrayExtent(ScopArrayInfo *Array);
+  bool insertCimGemm(MatMulInfoTyExtended &MMI) const;
+  int rows(ScopArrayInfo *SAI) const;
+  int cols(ScopArrayInfo *SAI) const;
+  BlasDataType type(ScopArrayInfo *SAI) const;
+  isl::set getArrayExtent(ScopArrayInfo *Array) const;
   std::tuple<isl::val, isl::val, isl::val, isl::val>
-  getArrayBounds(ScopArrayInfo *Array);
+  getArrayBounds(ScopArrayInfo *Array) const;
   std::pair<isl::val, isl::val> getDimensionBounds(isl::ctx ctx,
-                                                   isl::set extent, int dim);
+                                                   isl::set extent, int dim) const;
 };
 
 #endif // POLLY_ISLNODEBUILDER_H

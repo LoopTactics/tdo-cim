@@ -10,4 +10,15 @@ void cim_tear_down(float dummy) { dump_function(); }
 void cim_allocate_shared_memory(float bytes) { 
   dump_function(); printf("bytes: %f\n", bytes); 
 }
-void cim_gemm_double(double *A, double *B, double *C) { dump_function(); sleep(5); } 
+void cim_gemm_int(
+int m, int n, int k, int *A, int lda, int *B, int ldb,  int *C, int ldc) { 
+
+  printf("%s\n", "param:");
+  printf("%s%d\n", "m: ", m);
+  printf("%s%d\n", "n: ", n);
+  printf("%s%d\n", "k: ", k);
+    
+  dump_function(); 
+  sleep(5); 
+
+} 

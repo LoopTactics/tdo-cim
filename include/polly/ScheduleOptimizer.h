@@ -50,6 +50,12 @@ enum class Tactic {
   FUSION
 };
 
+enum class BlasDataType {
+  FLOAT,
+  DOUBLE,
+  INT
+};
+
 /// Parameters for the matrix-matrix multiplication.
 struct MatMulInfoTyExtended {
 

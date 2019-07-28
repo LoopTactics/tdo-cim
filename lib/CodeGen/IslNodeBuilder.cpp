@@ -418,8 +418,7 @@ void IslNodeBuilder::insertDummy() {
 */
 
 /// Return the array extent.
-/*
-isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
+isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) const {
   unsigned NumDims = Array->getNumberOfDimensions();
 
   if (Array->getNumberOfDimensions() == 0)
@@ -473,7 +472,7 @@ isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
 
   return Extent;
 }
-*/
+
 /// Return lower and upper bound for a given dimension
 /// of a given array.
 /// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
@@ -483,9 +482,9 @@ isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) {
 ///
 /// If we cannot statically compute the array bounds the
 /// function returns (-1, -1)
-/*
+
 std::pair<isl::val, isl::val>
-IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
+IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) const {
 
   assert(static_cast<size_t>(dim) < extent.dim(isl::dim::set) &&
          "must be less!\n");
@@ -510,7 +509,7 @@ IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
   upper_bound_val = upper_bound_val.add(isl::val::one(ctx));
   return std::make_pair(lower_bound_val, upper_bound_val);
 }
-*/
+
 /// Get the dimensions bounds for a 2d array.
 /// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
 /// getArrayBounds(A) returns:
@@ -518,9 +517,9 @@ IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
 /// -> 1024 as upper bound for dimension i
 /// -> 0 as lower bound for dimension j
 /// -> 2048 as upper bound for dimension j
-/*
+
 std::tuple<isl::val, isl::val, isl::val, isl::val>
-IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
+IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) const {
 
   isl::ctx ctx = Array->getScop().getIslCtx();
   isl::val negone = isl::val::negone(ctx);
@@ -553,9 +552,36 @@ IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) {
   return std::make_tuple(dims_i.first, dims_i.second, dims_j.first,
                          dims_j.second);
 }
-*/
 
-void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
+int IslNodeBuilder::rows(ScopArrayInfo *SAI) const {
+
+  assert(SAI->isArrayKind() && "expect array!");
+  auto bounds = getArrayBounds(SAI);
+  isl::val rows = std::get<1>(bounds);
+  return std::stoi(rows.to_str());
+}
+
+int IslNodeBuilder::cols(ScopArrayInfo *SAI) const {
+
+  assert(SAI->isArrayKind() && "expect array!");
+  auto bounds = getArrayBounds(SAI);
+  isl::val cols = std::get<3>(bounds);
+  return std::stoi(cols.to_str());
+}
+
+BlasDataType IslNodeBuilder::type(ScopArrayInfo *SAI) const {
+
+  Type *T = SAI->getElementType();
+  if (T->isIntegerTy())
+    return BlasDataType::INT;
+  if (T->isFloatTy())
+    return BlasDataType::FLOAT;
+  if (T->isDoubleTy())
+    return BlasDataType::DOUBLE;
+  assert(0 && "type not supported!");
+}
+
+bool IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) const {
 
   ScopArrayInfo *SAI_A =
     const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());
@@ -564,41 +590,50 @@ void IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) {
   ScopArrayInfo *SAI_C =
       const_cast<ScopArrayInfo *>(MMI.WriteToC->getLatestScopArrayInfo());
 
-  // array bounds for C.
-  //auto C_bounds = getArrayBounds(SAI_C);
-  //LLVM_DEBUG(dbgs() << "dim: " << std::get<0>(C_bounds).to_str() << "\n");
-  //LLVM_DEBUG(dbgs() << "dim: " << std::get<1>(C_bounds).to_str() << "\n");
-  //LLVM_DEBUG(dbgs() << "dim: " << std::get<2>(C_bounds).to_str() << "\n");
-  //LLVM_DEBUG(dbgs() << "dim: " << std::get<3>(C_bounds).to_str() << "\n");
-
-  // get the base pointer for C.
-  //Value *C_base_pointer = SAI_C->getBasePtr();
-  //C_base_pointer->dump();
+  if (type(SAI_A) != BlasDataType::INT) {
+    LLVM_DEBUG(dbgs() << "Cannot generate code for CIM fall back to CPU\n");
+    return false;
+  }
 
   Value *A_base_pointer = SAI_A->getBasePtr();
   Value *B_base_pointer = SAI_B->getBasePtr();
   Value *C_base_pointer = SAI_C->getBasePtr();
+  
+  Value *m = ConstantInt::get(Builder.getInt64Ty(), rows(SAI_C));
+  Value *n = ConstantInt::get(Builder.getInt64Ty(), cols(SAI_C));
+  Value *k = ConstantInt::get(Builder.getInt64Ty(), cols(SAI_A));
+  Value *lda = (MMI.isTransposeA) ? k : m;
+  Value *ldb = (MMI.isTransposeB) ? n : k;
+  Value *ldc = m; 
 
   // FIXME: What about alpha and beta
   // are we interested?
   // Can we define the interface for the GEMM call?
   // FIXME: get operand type i.e., float or double.
   
-  const char *Name = "cim_gemm_double";
+  const char *Name = "cim_gemm_int";
   Module *M = Builder.GetInsertBlock()->getParent()->getParent();
   Function *F = M->getFunction(Name);
 
   if (!F) {
     GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
     std::vector<Type *> Args;
-    Args.push_back(Builder.getInt8PtrTy());
-    Args.push_back(Builder.getInt8PtrTy());
-    Args.push_back(Builder.getInt8PtrTy());
+    Args.push_back(Builder.getInt64Ty());     // m
+    Args.push_back(Builder.getInt64Ty());     // n
+    Args.push_back(Builder.getInt64Ty());     // k
+    Args.push_back(Builder.getInt8PtrTy());   // A
+    Args.push_back(Builder.getInt64Ty());     // lda
+    Args.push_back(Builder.getInt8PtrTy());   // B
+    Args.push_back(Builder.getInt64Ty());     // ldb
+    Args.push_back(Builder.getInt8PtrTy());   // C
+    Args.push_back(Builder.getInt64Ty());     // ldc
     FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
     F = Function::Create(Ty, Linkage, Name, M);
   }
   
-  Builder.CreateCall(F, {A_base_pointer, B_base_pointer, C_base_pointer});
+  Builder.CreateCall(F, {m, n, k, A_base_pointer, 
+  lda, B_base_pointer, ldb, C_base_pointer, ldc});
+  return true;
 }
 
 void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
@@ -640,10 +675,12 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
   }
   if (strcmp(isl_id_get_name(Id), "gemm") == 0) {
     auto p = static_cast<Payload<MatMulInfoTyExtended> *>(isl_id_get_user(Id));
-    insertCimGemm(p->patternTys[p->current]);
-    isl_ast_node_free(Child);
-    isl_id_free(Id);
-    return;
+    if (insertCimGemm(p->patternTys[p->current])) {
+      p->current++;
+      isl_ast_node_free(Child);
+      isl_id_free(Id);
+      return;
+    }
   }
   create(Child);
   isl_id_free(Id);
