@@ -418,13 +418,15 @@ void IslNodeBuilder::insertDummy() {
 */
 
 /// Return the array extent.
-isl::set IslNodeBuilder::getArrayExtent(ScopArrayInfo *Array) const {
+isl::set IslNodeBuilder::getArrayExtent(const ScopArrayInfo *Array) const {
   unsigned NumDims = Array->getNumberOfDimensions();
 
   if (Array->getNumberOfDimensions() == 0)
     return isl::set::universe(Array->getSpace());
 
-  isl::union_map Accesses = S.getAccesses(Array);
+  //XXX
+  isl::union_map Accesses = 
+    const_cast<Scop&>(S).getAccesses(const_cast<ScopArrayInfo*>(Array));
   isl::union_set AccessUSet = Accesses.range();
   AccessUSet = AccessUSet.coalesce();
   AccessUSet = AccessUSet.detect_equalities();
@@ -519,7 +521,7 @@ IslNodeBuilder::getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) const
 /// -> 2048 as upper bound for dimension j
 
 std::tuple<isl::val, isl::val, isl::val, isl::val>
-IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) const {
+IslNodeBuilder::getArrayBounds(const ScopArrayInfo *Array) const {
 
   isl::ctx ctx = Array->getScop().getIslCtx();
   isl::val negone = isl::val::negone(ctx);
@@ -553,7 +555,7 @@ IslNodeBuilder::getArrayBounds(ScopArrayInfo *Array) const {
                          dims_j.second);
 }
 
-int IslNodeBuilder::rows(ScopArrayInfo *SAI) const {
+int IslNodeBuilder::rows(const ScopArrayInfo *SAI) const {
 
   assert(SAI->isArrayKind() && "expect array!");
   auto bounds = getArrayBounds(SAI);
@@ -561,7 +563,7 @@ int IslNodeBuilder::rows(ScopArrayInfo *SAI) const {
   return std::stoi(rows.to_str());
 }
 
-int IslNodeBuilder::cols(ScopArrayInfo *SAI) const {
+int IslNodeBuilder::cols(const ScopArrayInfo *SAI) const {
 
   assert(SAI->isArrayKind() && "expect array!");
   auto bounds = getArrayBounds(SAI);
@@ -569,7 +571,7 @@ int IslNodeBuilder::cols(ScopArrayInfo *SAI) const {
   return std::stoi(cols.to_str());
 }
 
-BlasDataType IslNodeBuilder::type(ScopArrayInfo *SAI) const {
+BlasDataType IslNodeBuilder::type(const ScopArrayInfo *SAI) const {
 
   Type *T = SAI->getElementType();
   if (T->isIntegerTy())
@@ -581,7 +583,7 @@ BlasDataType IslNodeBuilder::type(ScopArrayInfo *SAI) const {
   assert(0 && "type not supported!");
 }
 
-bool IslNodeBuilder::insertCimGemm(MatMulInfoTyExtended &MMI) const {
+bool IslNodeBuilder::insertCimGemm(const MatMulInfoTyExtended &MMI) const {
 
   ScopArrayInfo *SAI_A =
     const_cast<ScopArrayInfo *>(MMI.A->getLatestScopArrayInfo());

@@ -463,13 +463,13 @@ private:
   void insert_cim_allocate_shared_memory(int bytes);
   void insert_cim_tear_down();
   void insert_cim_init();
-  bool insertCimGemm(MatMulInfoTyExtended &MMI) const;
-  int rows(ScopArrayInfo *SAI) const;
-  int cols(ScopArrayInfo *SAI) const;
-  BlasDataType type(ScopArrayInfo *SAI) const;
-  isl::set getArrayExtent(ScopArrayInfo *Array) const;
+  bool insertCimGemm(const MatMulInfoTyExtended &MMI) const;
+  int rows(const ScopArrayInfo *SAI) const;
+  int cols(const ScopArrayInfo *SAI) const;
+  BlasDataType type(const ScopArrayInfo *SAI) const;
+  isl::set getArrayExtent(const ScopArrayInfo *Array) const;
   std::tuple<isl::val, isl::val, isl::val, isl::val>
-  getArrayBounds(ScopArrayInfo *Array) const;
+  getArrayBounds(const ScopArrayInfo *Array) const;
   std::pair<isl::val, isl::val> getDimensionBounds(isl::ctx ctx,
                                                    isl::set extent, int dim) const;
 };
