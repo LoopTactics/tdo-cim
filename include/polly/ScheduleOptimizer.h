@@ -45,16 +45,9 @@ struct Dependences;
 class MemoryAccess;
 class Scop;
 
-enum class Tactic {
-  TILING,
-  FUSION
-};
+enum class Tactic { TILING, FUSION };
 
-enum class BlasDataType {
-  FLOAT,
-  DOUBLE,
-  INT
-};
+enum class BlasDataType { FLOAT, DOUBLE, INT };
 
 /// Parameters for the matrix-matrix multiplication.
 struct MatMulInfoTyExtended {
@@ -82,7 +75,7 @@ struct MatVecInfoTy {
   bool isTranspose = false;
 };
 
-//FIXME: I really do not like this 
+// FIXME: I really do not like this
 // Maybe just allocate MMI directly with
 // new and bind the address to a mark node.
 // Then you can walk the tree and get the info

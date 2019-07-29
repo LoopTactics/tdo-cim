@@ -465,18 +465,18 @@ private:
   void insert_cim_init();
   bool insertCimGemm(const MatMulInfoTyExtended &MMI) const;
   bool insertCimGemv(const MatVecInfoTy &MVI) const;
-  void insertCallCimGemv(Value *m, Value *n, Value *A, Value *lda,
-    Value *X, Value *inc_x, Value *Y, Value *inc_y) const;
-  void insertCallCimGemm(Value *m, Value *n, Value *k, Value *A,
-    Value *lda, Value *B, Value *ldb, Value *C, Value *ldc) const;
+  void insertCallCimGemv(Value *m, Value *n, Value *A, Value *lda, Value *X,
+                         Value *inc_x, Value *Y, Value *inc_y) const;
+  void insertCallCimGemm(Value *m, Value *n, Value *k, Value *A, Value *lda,
+                         Value *B, Value *ldb, Value *C, Value *ldc) const;
   int rows(const ScopArrayInfo *SAI) const;
   int cols(const ScopArrayInfo *SAI) const;
   BlasDataType type(const ScopArrayInfo *SAI) const;
   isl::set getArrayExtent(const ScopArrayInfo *Array) const;
   std::tuple<isl::val, isl::val, isl::val, isl::val>
   getArrayBounds(const ScopArrayInfo *Array) const;
-  std::pair<isl::val, isl::val> getDimensionBounds(isl::ctx ctx,
-                                                   isl::set extent, int dim) const;
+  std::pair<isl::val, isl::val>
+  getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) const;
 };
 
 #endif // POLLY_ISLNODEBUILDER_H

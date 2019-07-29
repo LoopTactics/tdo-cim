@@ -1831,7 +1831,8 @@ isl::union_map getTaggedMustWrites(const Scop &s) {
 /// Given the schedule "schedule" returns
 /// the tagged memory accesses that belong to schedule
 /// and have the provided stmtId.
-isl::union_map getTaggedReads(const Scop &s, isl::map schedule, isl::id stmtId) {
+isl::union_map getTaggedReads(const Scop &s, isl::map schedule,
+                              isl::id stmtId) {
 
   isl::union_map res = isl::union_map::empty(schedule.get_space());
   isl::union_map taggedReads = getTaggedReads(s);
@@ -1863,7 +1864,8 @@ isl::union_map getTaggedReads(const Scop &s, isl::map schedule, isl::id stmtId) 
 /// Given the schedule "schedule" returns
 /// the tagged memory accesses that belong to schedule and have
 /// the provided id.
-isl::union_map getTaggedWrites(const Scop &s, isl::map schedule, isl::id stmtId) {
+isl::union_map getTaggedWrites(const Scop &s, isl::map schedule,
+                               isl::id stmtId) {
 
   isl::union_map res = isl::union_map::empty(schedule.get_space());
   isl::union_map taggedWrites = getTaggedMustWrites(s);
@@ -2258,7 +2260,8 @@ tile_node(isl::schedule_node node, int tileSize) {
 }
 
 // fw. decl.
-isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule, const Scop &s);
+isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule,
+                                               const Scop &s);
 
 static isl::schedule_node addCimStartUp(isl::schedule_node node) {
 
@@ -2266,33 +2269,32 @@ static isl::schedule_node addCimStartUp(isl::schedule_node node) {
   isl::union_set domain;
   isl::schedule_node graft;
 
-  space = isl::space(node.get_ctx(), 0 ,0);
-  space = space.set_tuple_name(isl::dim::set, "cim_init");  
+  space = isl::space(node.get_ctx(), 0, 0);
+  space = space.set_tuple_name(isl::dim::set, "cim_init");
   domain = isl::union_set(isl::set::universe(space));
   graft = isl::schedule_node::from_domain(domain);
   node = node.graft_before(graft);
   return node;
 }
 
-static isl::schedule_node addCimAllocateSharedMemory(
-  isl::schedule_node node, int bytes) {
+static isl::schedule_node addCimAllocateSharedMemory(isl::schedule_node node,
+                                                     int bytes) {
 
   isl::space space;
   isl::union_set domain;
   isl::schedule_node graft;
 
-  space = isl::space(node.get_ctx(), 0 ,0);
-  space = space.set_tuple_name(isl::dim::set, "cim_allocate_shared_memory");  
+  space = isl::space(node.get_ctx(), 0, 0);
+  space = space.set_tuple_name(isl::dim::set, "cim_allocate_shared_memory");
   domain = isl::union_set(isl::set::universe(space));
   graft = isl::schedule_node::from_domain(domain);
   int *p_bytes = new int;
   *p_bytes = bytes;
-  graft = graft.child(0).
-    insert_mark(isl::id::alloc(node.get_ctx(), "__cim_allocate_", p_bytes));
+  graft = graft.child(0).insert_mark(
+      isl::id::alloc(node.get_ctx(), "__cim_allocate_", p_bytes));
   graft = graft.parent();
   node = node.graft_before(graft);
-  return node; 
-
+  return node;
 }
 
 static isl::schedule_node addCimTearDown(isl::schedule_node node) {
@@ -2301,7 +2303,7 @@ static isl::schedule_node addCimTearDown(isl::schedule_node node) {
   isl::union_set domain;
   isl::schedule_node graft;
 
-  space = isl::space(node.get_ctx(), 0 ,0);
+  space = isl::space(node.get_ctx(), 0, 0);
   space = space.set_tuple_name(isl::dim::set, "cim_tear_down");
   domain = isl::union_set(isl::set::universe(space));
   graft = isl::schedule_node::from_domain(domain);
@@ -2310,7 +2312,8 @@ static isl::schedule_node addCimTearDown(isl::schedule_node node) {
 }
 
 // is the pattern gemm-like?
-isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic tac) {
+isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s,
+                             const Tactic tac) {
 
   isl::schedule_node root = schedule.get_root();
 
@@ -2376,45 +2379,45 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic
     else
       return true;
   };
-/*
-  // This callback always returns true. The only purpose is to
-  // check if tiling is profitable for the CIM device.
-  auto needToTile = [&](isl::schedule_node band) {
-    auto schedule = band.get_prefix_schedule_union_map();
-    schedule = schedule.intersect_domain(s.getDomains());
-    schedule.foreach_map([&](isl::map m) {
-      auto max_i = m.domain().dim_max(0);
-      auto max_j = m.domain().dim_max(1);
-      auto max_k = m.domain().dim_max(2);
+  /*
+    // This callback always returns true. The only purpose is to
+    // check if tiling is profitable for the CIM device.
+    auto needToTile = [&](isl::schedule_node band) {
+      auto schedule = band.get_prefix_schedule_union_map();
+      schedule = schedule.intersect_domain(s.getDomains());
+      schedule.foreach_map([&](isl::map m) {
+        auto max_i = m.domain().dim_max(0);
+        auto max_j = m.domain().dim_max(1);
+        auto max_k = m.domain().dim_max(2);
 
-      isl::val val_max_i;
-      isl::val val_max_j;
-      isl::val val_max_k;
-      max_i.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
-        val_max_i = a.get_constant_val();
+        isl::val val_max_i;
+        isl::val val_max_j;
+        isl::val val_max_k;
+        max_i.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+          val_max_i = a.get_constant_val();
+          return isl_stat_ok;
+        });
+        max_j.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+          val_max_j = a.get_constant_val();
+          return isl_stat_ok;
+        });
+        max_k.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
+          val_max_k = a.get_constant_val();
+          return isl_stat_ok;
+        });
+        LLVM_DEBUG(dbgs() << val_max_i.to_str() << "\n");
+        LLVM_DEBUG(dbgs() << val_max_j.to_str() << "\n");
+        LLVM_DEBUG(dbgs() << val_max_k.to_str() << "\n");
+        if (std::stoi(val_max_i.to_str()) < TILE_FACTOR_CIM_DEVICE ||
+            std::stoi(val_max_j.to_str()) < TILE_FACTOR_CIM_DEVICE ||
+            std::stoi(val_max_k.to_str()) < TILE_FACTOR_CIM_DEVICE) {
+          LLVM_DEBUG(dbgs() << "set to false\n");
+        }
         return isl_stat_ok;
       });
-      max_j.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
-        val_max_j = a.get_constant_val();
-        return isl_stat_ok;
-      });
-      max_k.foreach_piece([&](isl::set s, isl::aff a) -> isl_stat {
-        val_max_k = a.get_constant_val();
-        return isl_stat_ok;
-      });
-      LLVM_DEBUG(dbgs() << val_max_i.to_str() << "\n");
-      LLVM_DEBUG(dbgs() << val_max_j.to_str() << "\n");
-      LLVM_DEBUG(dbgs() << val_max_k.to_str() << "\n");
-      if (std::stoi(val_max_i.to_str()) < TILE_FACTOR_CIM_DEVICE ||
-          std::stoi(val_max_j.to_str()) < TILE_FACTOR_CIM_DEVICE ||
-          std::stoi(val_max_k.to_str()) < TILE_FACTOR_CIM_DEVICE) {
-        LLVM_DEBUG(dbgs() << "set to false\n");
-      }
-      return isl_stat_ok;
-    });
-    return true;
-  }; 
-*/
+      return true;
+    };
+  */
   // look for the gemm pattern
   isl::schedule_node gemm_body;
   auto matcherGemm = [&]() {
@@ -2428,7 +2431,7 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic
   }();
 
   // rebuild gemm pattern with a fixed tile size,
-  // needed by the cim device. 
+  // needed by the cim device.
   auto builderGemm = builders::ScheduleNodeBuilder();
   {
     using namespace builders;
@@ -2450,18 +2453,19 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic
     };
     auto originalSchedule = [&]() {
       auto descr = BandDescriptor(gemm_body);
-      return descr; 
+      return descr;
     };
-    builderGemm = (tac == Tactic::TILING) ?
-      band(computeScheduleTile, mark(marker, band(computeSchedulePoint))) :
-      mark(marker, band(originalSchedule));
+    builderGemm = (tac == Tactic::TILING)
+                      ? band(computeScheduleTile,
+                             mark(marker, band(computeSchedulePoint)))
+                      : mark(marker, band(originalSchedule));
   }
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
 
   if (tac == Tactic::FUSION) {
-    root = 
-      fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s).get_root();
+    root = fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s)
+               .get_root();
   }
 
   // early exit if we did not detect any core gemm stmt.
@@ -2543,8 +2547,9 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s, const Tactic
   return root.root().get_schedule();
 }
 
-static bool checkFusionHelper(std::string a_x, std::string b_x,
-  std::string c_x, std::string a_y, std::string b_y, std::string c_y) {
+static bool checkFusionHelper(std::string a_x, std::string b_x, std::string c_x,
+                              std::string a_y, std::string b_y,
+                              std::string c_y) {
 
   if (c_y.compare(c_x) == 0)
     return false;
@@ -2556,29 +2561,23 @@ static bool checkFusionHelper(std::string a_x, std::string b_x,
 static bool checkFusion() {
 
   assert(pGemm.patternTys.size() == 2);
-  
-  ScopArrayInfo *sai_a_x =
-    const_cast<ScopArrayInfo *>(
+
+  ScopArrayInfo *sai_a_x = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[0].A->getLatestScopArrayInfo());
-  ScopArrayInfo *sai_b_x =
-    const_cast<ScopArrayInfo *>(
+  ScopArrayInfo *sai_b_x = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[0].B->getLatestScopArrayInfo());
-  ScopArrayInfo *sai_c_x =
-    const_cast<ScopArrayInfo *>(
+  ScopArrayInfo *sai_c_x = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[0].WriteToC->getLatestScopArrayInfo());
 
-  ScopArrayInfo *sai_a_y =
-    const_cast<ScopArrayInfo *>(
+  ScopArrayInfo *sai_a_y = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[1].A->getLatestScopArrayInfo());
-  ScopArrayInfo *sai_b_y =
-    const_cast<ScopArrayInfo *>(
+  ScopArrayInfo *sai_b_y = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[1].B->getLatestScopArrayInfo());
-  ScopArrayInfo *sai_c_y =
-    const_cast<ScopArrayInfo *>(
+  ScopArrayInfo *sai_c_y = const_cast<ScopArrayInfo *>(
       pGemm.patternTys[1].WriteToC->getLatestScopArrayInfo());
 
   std::string a_x = sai_a_x->getName();
-  std::string b_x = sai_b_x->getName(); 
+  std::string b_x = sai_b_x->getName();
   std::string c_x = sai_c_x->getName();
   std::string a_y = sai_a_y->getName();
   std::string b_y = sai_b_y->getName();
@@ -2587,24 +2586,23 @@ static bool checkFusion() {
   return checkFusionHelper(a_x, b_x, c_x, a_y, b_y, c_y);
 }
 
-
 // First attemp to kernel fusion.
-// 
+//
 // We fuse two *consecutive* gemm pattern
 // if *not tiled*.
 // In addition, we fuse only if the two kernels are
-// idependent, meaning that the following condition 
+// idependent, meaning that the following condition
 // should hold:
 // 1. Given to fusion candidates X and Y with Y following *directly* X
 // Y must not read from or write to any output of X and does not
 // write to any input of Y.
 // This function **must** be called after isGemmLikeLate
 // TODO: Kanishkan: We need to have a cost function for fusion for the CIM
-// device. Any idea? 
-isl::schedule fuseTwoConsecutiveGemmIfNotTiled
-(isl::schedule schedule, const Scop &s) {
+// device. Any idea?
+isl::schedule fuseTwoConsecutiveGemmIfNotTiled(isl::schedule schedule,
+                                               const Scop &s) {
 
-  // early exit if the number of gemm pattern detected 
+  // early exit if the number of gemm pattern detected
   // is less than two.
   if (pGemm.patternTys.size() < 2) {
     return schedule;
@@ -2617,7 +2615,6 @@ isl::schedule fuseTwoConsecutiveGemmIfNotTiled
   isl::schedule_node root = schedule.get_root();
 
   auto hasGemmId = [&](isl::schedule_node mark) {
-    
     auto mark_id = mark.mark_get_id().to_str();
     mark_id = mark_id.substr(0, mark_id.find("@"));
     if (!mark_id.compare("gemm") == 0) {
@@ -2633,11 +2630,11 @@ isl::schedule fuseTwoConsecutiveGemmIfNotTiled
     // clang-forma off
     using namespace matchers;
     return domain(
-      domain_node,
-        sequence(filter(filter_node_upper, 
-                   mark(hasGemmId, band(schedule_node_upper, leaf()))),
-                 filter(filter_node_lower, 
-                   mark(hasGemmId, band(schedule_node_lower, leaf())))));
+        domain_node,
+        sequence(filter(filter_node_upper,
+                        mark(hasGemmId, band(schedule_node_upper, leaf()))),
+                 filter(filter_node_lower,
+                        mark(hasGemmId, band(schedule_node_lower, leaf())))));
   }();
   // clang-format on
 
@@ -2658,7 +2655,7 @@ isl::schedule fuseTwoConsecutiveGemmIfNotTiled
         domain(domain_node.domain_get_domain(),
                band(fused_schedule,
                     sequence(filter(filter_node_upper.filter_get_filter()),
-                             filter(filter_node_lower.filter_get_filter()))));  
+                             filter(filter_node_lower.filter_get_filter()))));
     // clang-format on
     return builder.build();
   }();
@@ -2770,8 +2767,8 @@ bool checkAccessGemvStmt(const Scop &s, isl::map schedule, MatVecInfoTy &MVI) {
 static isl::schedule isGemvLikeLate(isl::schedule schedule, const Scop &s) {
 
   isl::schedule_node root = schedule.get_root();
-  
-   pGemv.flush();
+
+  pGemv.flush();
 
   auto hasGemvConditions = [&](isl::schedule_node band) {
     isl::union_map schedule =
@@ -2841,22 +2838,20 @@ static isl::schedule isGemvLikeLate(isl::schedule schedule, const Scop &s) {
     auto marker = [&]() {
       return isl::id::alloc(s.getIslCtx(), "gemv", &pGemv);
     };
-    builderGemv = 
-      band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
+    builderGemv =
+        band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
   }
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemv, builderGemv);
   return root.root().get_schedule();
 }
 
-template<class T, class...>
-struct are_same : std::true_type
-{};
+template <class T, class...> struct are_same : std::true_type {};
 
-template<class T, class U, class... TT>
+template <class T, class U, class... TT>
 struct are_same<T, U, TT...>
-    : std::integral_constant<bool, std::is_same<T,U>{} && are_same<T, TT...>{}>
-{};
+    : std::integral_constant<bool,
+                             std::is_same<T, U>{} && are_same<T, TT...>{}> {};
 
 template <typename T, typename arg, typename... args>
 void do_for(T f, arg first, args... rest) {
@@ -2865,8 +2860,7 @@ void do_for(T f, arg first, args... rest) {
   do_for(f, rest...);
 }
 
-template <typename T>
-void do_for(T f) {}
+template <typename T> void do_for(T f) {}
 
 /// Return the array extent.
 static isl::set getArrayExtent(const ScopArrayInfo *Array, const Scop &S) {
@@ -2875,9 +2869,9 @@ static isl::set getArrayExtent(const ScopArrayInfo *Array, const Scop &S) {
   if (Array->getNumberOfDimensions() == 0)
     return isl::set::universe(Array->getSpace());
 
-  //XXX
-  isl::union_map Accesses = 
-    const_cast<Scop&>(S).getAccesses(const_cast<ScopArrayInfo*>(Array));
+  // XXX
+  isl::union_map Accesses =
+      const_cast<Scop &>(S).getAccesses(const_cast<ScopArrayInfo *>(Array));
   isl::union_set AccessUSet = Accesses.range();
   AccessUSet = AccessUSet.coalesce();
   AccessUSet = AccessUSet.detect_equalities();
@@ -2962,8 +2956,6 @@ getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
   return std::make_pair(lower_bound_val, upper_bound_val);
 }
 
-
-
 /// Get the dimensions bounds for a 2d array.
 /// i.e., A[i][j] : 0 <= i <= 1024, 0 <= j <= 2048
 /// getArrayBounds(A) returns:
@@ -2971,7 +2963,7 @@ getDimensionBounds(isl::ctx ctx, isl::set extent, int dim) {
 /// -> 1024 as upper bound for dimension i
 /// -> 0 as lower bound for dimension j
 /// -> 2048 as upper bound for dimension j
-static std::tuple<isl::val, isl::val, isl::val, isl::val> 
+static std::tuple<isl::val, isl::val, isl::val, isl::val>
 getArrayBounds(const ScopArrayInfo *Array, const Scop &S) {
 
   isl::ctx ctx = Array->getScop().getIslCtx();
@@ -3014,18 +3006,17 @@ static int getBytesForArray(const ScopArrayInfo *sai, const Scop &s) {
 
   auto bounds = getArrayBounds(sai, s);
 
-  isl::val dim_i = std::get<1>(bounds).sub(std::get<0>(bounds)); 
+  isl::val dim_i = std::get<1>(bounds).sub(std::get<0>(bounds));
   isl::val dim_j = std::get<3>(bounds).sub(std::get<2>(bounds));
   dim_i = dim_i.mul(dim_j);
 
-  int total_elements = std::stoi(dim_i.to_str());  
+  int total_elements = std::stoi(dim_i.to_str());
   int size_element = sai->getElemSizeInBytes();
   return total_elements * size_element;
-
 }
 
-static std::pair<isl::val, isl::val> getVectorBounds(const ScopArrayInfo *sai, 
-const Scop &s) {
+static std::pair<isl::val, isl::val> getVectorBounds(const ScopArrayInfo *sai,
+                                                     const Scop &s) {
 
   isl::set extent = getArrayExtent(sai, s);
   isl::ctx ctx = sai->getScop().getIslCtx();
@@ -3051,37 +3042,39 @@ static int getBytesForVector(const ScopArrayInfo *sai, const Scop &s) {
 
   auto bounds = getVectorBounds(sai, s);
   isl::val dim_i = bounds.second.sub(bounds.first);
-  
+
   int total_elements = std::stoi(dim_i.to_str());
   int size_element = sai->getElemSizeInBytes();
   return total_elements * size_element;
-
-} 
+}
 
 template <typename T, typename... Args>
-static int computeSharedMemorySize(const Scop &s, const T arg, const Args... args) {
+static int computeSharedMemorySize(const Scop &s, const T arg,
+                                   const Args... args) {
 
-  static_assert(are_same<MemoryAccess*, Args...>{}, "must be of type MemoryAccess*");
+  static_assert(are_same<MemoryAccess *, Args...>{},
+                "must be of type MemoryAccess*");
 
-  std::vector<MemoryAccess*> mem_accesses{};
+  std::vector<MemoryAccess *> mem_accesses{};
   mem_accesses.push_back(arg);
 
-  do_for([&](MemoryAccess * arg) {
-    mem_accesses.push_back(arg);
-  }, args...);
+  do_for([&](MemoryAccess *arg) { mem_accesses.push_back(arg); }, args...);
 
   int bytes = 0;
 
   for (const auto &mem_acc : mem_accesses) {
     ScopArrayInfo *sai =
-      const_cast<ScopArrayInfo*>(mem_acc->getLatestScopArrayInfo());
+        const_cast<ScopArrayInfo *>(mem_acc->getLatestScopArrayInfo());
     int dims = sai->getNumberOfDimensions();
     switch (dims) {
-      case 1:
-        bytes+= getBytesForVector(sai,s); break;
-      case 2:
-        bytes += getBytesForArray(sai,s); break;
-      default: assert(0);
+    case 1:
+      bytes += getBytesForVector(sai, s);
+      break;
+    case 2:
+      bytes += getBytesForArray(sai, s);
+      break;
+    default:
+      assert(0);
     }
   }
 
@@ -3090,7 +3083,7 @@ static int computeSharedMemorySize(const Scop &s, const T arg, const Args... arg
 
 // This will likely change in the near future.
 // I really do not like to have this static variable
-// pGemm. Another approach would be to allocate the 
+// pGemm. Another approach would be to allocate the
 // MMI structs with new and then walk the tree to collect
 // the info you want.
 static int computeSharedMemorySizeForGemm(const Scop &s) {
@@ -3111,8 +3104,9 @@ static int computeSharedMemorySizeForGemv(const Scop &s) {
   return bytes;
 }
 
-static isl::schedule handleCimInitAndTearDown(isl::schedule schedule,
-const Scop &s, std::function<int(const Scop &s)> f) {
+static isl::schedule
+handleCimInitAndTearDown(isl::schedule schedule, const Scop &s,
+                         std::function<int(const Scop &s)> f) {
 
   isl::schedule_node root = schedule.get_root().child(0);
   root = addCimStartUp(root);
@@ -3129,21 +3123,23 @@ static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
 
   schedule = isGemmLikeLate(schedule, s, tac);
   if (lookUpScheduleTree(schedule, "gemm")) {
-    // insert cim init and tear_down only if  
+    // insert cim init and tear_down only if
     // we detect the gemm pattern. We also graft a subtree
     // used to allocate the shared memory needed by the CIM
     // device.
-    std::function<int(const Scop &s)> 
-      computeSharedMemorySizeForGemmF = computeSharedMemorySizeForGemm; 
-    schedule = handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemmF);
+    std::function<int(const Scop &s)> computeSharedMemorySizeForGemmF =
+        computeSharedMemorySizeForGemm;
+    schedule =
+        handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemmF);
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }
 
   schedule = isGemvLikeLate(schedule, s);
   if (lookUpScheduleTree(schedule, "gemv")) {
-    std::function<int(const Scop &s)>
-      computeSharedMemorySizeForGemvF = computeSharedMemorySizeForGemv;
-    schedule = handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemvF);
+    std::function<int(const Scop &s)> computeSharedMemorySizeForGemvF =
+        computeSharedMemorySizeForGemv;
+    schedule =
+        handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemvF);
     LLVM_DEBUG(dbgs() << "Matchers: GEMV pattern detected!\n");
   }
 
@@ -3352,7 +3348,8 @@ static isl::schedule isGemmLikeEarly(isl::schedule schedule, Scop &s) {
 static isl::schedule optimizeScheduleWithMatchersEarly(isl::schedule schedule,
                                                        Scop &s) {
 
-  assert(0 &&
+  assert(
+      0 &&
       "Use optimizeScheduleWithMatchersLate, this flow is not available atm");
   schedule = isGemmLikeEarly(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
