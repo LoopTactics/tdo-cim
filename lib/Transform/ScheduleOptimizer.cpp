@@ -2666,7 +2666,7 @@ isl::schedule fuseTwoConsecutiveGemmIfNotTiled
   return new_root.get_schedule();
 }
 
-bool checkAccessGemvStmt(Scop &s, isl::map schedule, MatVecInfoTy &MVI) {
+bool checkAccessGemvStmt(const Scop &s, isl::map schedule, MatVecInfoTy &MVI) {
 
   isl::ctx ctx = s.getIslCtx();
 
@@ -2767,7 +2767,7 @@ bool checkAccessGemvStmt(Scop &s, isl::map schedule, MatVecInfoTy &MVI) {
 }
 
 // is the patter matrix-vector like?
-static isl::schedule isGemvLikeLate(isl::schedule schedule, Scop &s) {
+static isl::schedule isGemvLikeLate(isl::schedule schedule, const Scop &s) {
 
   isl::schedule_node root = schedule.get_root();
   
@@ -3010,6 +3010,8 @@ getArrayBounds(const ScopArrayInfo *Array, const Scop &S) {
 
 static int getBytesForArray(const ScopArrayInfo *sai, const Scop &s) {
 
+  assert(sai->getNumberOfDimensions() == 2);
+
   auto bounds = getArrayBounds(sai, s);
 
   isl::val dim_i = std::get<1>(bounds).sub(std::get<0>(bounds)); 
@@ -3022,9 +3024,38 @@ static int getBytesForArray(const ScopArrayInfo *sai, const Scop &s) {
 
 }
 
+static std::pair<isl::val, isl::val> getVectorBounds(const ScopArrayInfo *sai, 
+const Scop &s) {
+
+  isl::set extent = getArrayExtent(sai, s);
+  isl::ctx ctx = sai->getScop().getIslCtx();
+  isl::val negone = isl::val::negone(ctx);
+
+  if (extent.is_empty()) {
+    assert(0 && "Cannot statically compute the array bounds!");
+    return std::make_pair(negone, negone);
+  }
+
+  auto dims_i = getDimensionBounds(ctx, extent, 0);
+  if (dims_i.first.eq(negone) || dims_i.second.eq(negone)) {
+    assert(0 && "Cannot statically compute array bounds!");
+    return dims_i;
+  }
+
+  return dims_i;
+}
+
 static int getBytesForVector(const ScopArrayInfo *sai, const Scop &s) {
 
-  assert(0);
+  assert(sai->getNumberOfDimensions() == 1);
+
+  auto bounds = getVectorBounds(sai, s);
+  isl::val dim_i = bounds.second.sub(bounds.first);
+  
+  int total_elements = std::stoi(dim_i.to_str());
+  int size_element = sai->getElemSizeInBytes();
+  return total_elements * size_element;
+
 } 
 
 template <typename T, typename... Args>
@@ -3071,6 +3102,27 @@ static int computeSharedMemorySizeForGemm(const Scop &s) {
   return bytes;
 }
 
+static int computeSharedMemorySizeForGemv(const Scop &s) {
+
+  int bytes = 0;
+  for (auto const &MVI : pGemv.patternTys) {
+    bytes += computeSharedMemorySize(s, MVI.A, MVI.X, MVI.WriteToY);
+  }
+  return bytes;
+}
+
+static isl::schedule handleCimInitAndTearDown(isl::schedule schedule,
+const Scop &s, std::function<int(const Scop &s)> f) {
+
+  isl::schedule_node root = schedule.get_root().child(0);
+  root = addCimStartUp(root);
+  int bytes = f(s);
+  root = addCimAllocateSharedMemory(root, bytes);
+  root = addCimTearDown(root);
+  schedule = root.root().get_schedule();
+  return schedule;
+}
+
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
                                                       const Scop &s,
                                                       const Tactic &tac) {
@@ -3081,23 +3133,20 @@ static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
     // we detect the gemm pattern. We also graft a subtree
     // used to allocate the shared memory needed by the CIM
     // device.
-    isl::schedule_node root = schedule.get_root().child(0);    
-    root = addCimStartUp(root);
-
-    int bytes = 
-      computeSharedMemorySizeForGemm(s);
-
-    root = addCimAllocateSharedMemory(root, bytes);
-    root = addCimTearDown(root);
-    schedule = root.root().get_schedule();
+    std::function<int(const Scop &s)> 
+      computeSharedMemorySizeForGemmF = computeSharedMemorySizeForGemm; 
+    schedule = handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemmF);
     LLVM_DEBUG(dbgs() << "Matchers: GEMM pattern detected!\n");
   }
-/*
+
   schedule = isGemvLikeLate(schedule, s);
   if (lookUpScheduleTree(schedule, "gemv")) {
+    std::function<int(const Scop &s)>
+      computeSharedMemorySizeForGemvF = computeSharedMemorySizeForGemv;
+    schedule = handleCimInitAndTearDown(schedule, s, computeSharedMemorySizeForGemvF);
     LLVM_DEBUG(dbgs() << "Matchers: GEMV pattern detected!\n");
   }
-*/
+
   return schedule;
 }
 

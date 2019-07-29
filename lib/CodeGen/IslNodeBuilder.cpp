@@ -583,6 +583,91 @@ BlasDataType IslNodeBuilder::type(const ScopArrayInfo *SAI) const {
   assert(0 && "type not supported!");
 }
 
+void IslNodeBuilder::insertCallCimGemv(
+  Value *m, Value *n, Value *A, Value *lda, Value *X,
+  Value *inc_x, Value *Y, Value *inc_y) const {
+
+  const char *Name = "cim_gemv_int";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(Name);
+
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getInt64Ty());     // m
+    Args.push_back(Builder.getInt64Ty());     // n
+    Args.push_back(Builder.getInt8PtrTy());   // A
+    Args.push_back(Builder.getInt64Ty());     // lda
+    Args.push_back(Builder.getInt8PtrTy());   // X
+    Args.push_back(Builder.getInt64Ty());     // inc_x
+    Args.push_back(Builder.getInt8PtrTy());   // Y
+    Args.push_back(Builder.getInt64Ty());     // inc_y
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+  
+  Builder.CreateCall(F, {m, n, A, lda, X, inc_x, Y, inc_y});
+} 
+
+bool IslNodeBuilder::insertCimGemv(const MatVecInfoTy &MVI) const{
+
+  ScopArrayInfo *SAI_A =
+    const_cast<ScopArrayInfo *>(MVI.A->getLatestScopArrayInfo());
+  ScopArrayInfo *SAI_X =
+    const_cast<ScopArrayInfo *>(MVI.X->getLatestScopArrayInfo());
+  ScopArrayInfo *SAI_Y =
+    const_cast<ScopArrayInfo *>(MVI.WriteToY->getLatestScopArrayInfo());
+
+  if (type(SAI_A) != BlasDataType::INT) {
+    LLVM_DEBUG(dbgs() << "Cannot generate code for CIM fall back to CPU\n");
+    return false;
+  }
+
+  Value *A_base_pointer = SAI_A->getBasePtr();
+  Value *X_base_pointer = SAI_X->getBasePtr();
+  Value *Y_base_pointer = SAI_Y->getBasePtr();
+
+  Value *m = ConstantInt::get(Builder.getInt64Ty(), rows(SAI_A));
+  Value *n = ConstantInt::get(Builder.getInt64Ty(), cols(SAI_A));
+  Value *lda = m;
+  // FIXME: stride is assumed for now.
+  Value *inc_x = ConstantInt::get(Builder.getInt64Ty(), 1);
+  Value *inc_y = ConstantInt::get(Builder.getInt64Ty(), 1);
+  
+  insertCallCimGemv(
+    m, n, A_base_pointer, lda, X_base_pointer, inc_x, Y_base_pointer, inc_y);
+  return true;
+}
+
+void IslNodeBuilder::insertCallCimGemm(Value *m, Value *n, Value *k,
+  Value *A, Value *lda, Value *B, Value *ldb, Value *C, Value *ldc) const {
+
+  const char *Name = "cim_gemm_int";
+  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
+  Function *F = M->getFunction(Name);
+
+  if (!F) {
+    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
+    std::vector<Type *> Args;
+    Args.push_back(Builder.getInt64Ty());     // m
+    Args.push_back(Builder.getInt64Ty());     // n
+    Args.push_back(Builder.getInt64Ty());     // k
+    Args.push_back(Builder.getInt8PtrTy());   // A
+    Args.push_back(Builder.getInt64Ty());     // lda
+    Args.push_back(Builder.getInt8PtrTy());   // B
+    Args.push_back(Builder.getInt64Ty());     // ldb
+    Args.push_back(Builder.getInt8PtrTy());   // C
+    Args.push_back(Builder.getInt64Ty());     // ldc
+    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
+    F = Function::Create(Ty, Linkage, Name, M);
+  }
+  
+  Builder.CreateCall(F, {m, n, k, A, lda, B, ldb, C, ldc});
+}
+
+// FIXME
+// We avoid to codegen for CIM if we do not detect the pattern.
+// How to undo prev. introduced fuctions (i.e., cim_init?)
 bool IslNodeBuilder::insertCimGemm(const MatMulInfoTyExtended &MMI) const {
 
   ScopArrayInfo *SAI_A =
@@ -612,29 +697,8 @@ bool IslNodeBuilder::insertCimGemm(const MatMulInfoTyExtended &MMI) const {
   // are we interested?
   // Can we define the interface for the GEMM call?
   // FIXME: get operand type i.e., float or double.
-  
-  const char *Name = "cim_gemm_int";
-  Module *M = Builder.GetInsertBlock()->getParent()->getParent();
-  Function *F = M->getFunction(Name);
-
-  if (!F) {
-    GlobalValue::LinkageTypes Linkage = Function::ExternalLinkage;
-    std::vector<Type *> Args;
-    Args.push_back(Builder.getInt64Ty());     // m
-    Args.push_back(Builder.getInt64Ty());     // n
-    Args.push_back(Builder.getInt64Ty());     // k
-    Args.push_back(Builder.getInt8PtrTy());   // A
-    Args.push_back(Builder.getInt64Ty());     // lda
-    Args.push_back(Builder.getInt8PtrTy());   // B
-    Args.push_back(Builder.getInt64Ty());     // ldb
-    Args.push_back(Builder.getInt8PtrTy());   // C
-    Args.push_back(Builder.getInt64Ty());     // ldc
-    FunctionType *Ty = FunctionType::get(Builder.getVoidTy(), Args, false);
-    F = Function::Create(Ty, Linkage, Name, M);
-  }
-  
-  Builder.CreateCall(F, {m, n, k, A_base_pointer, 
-  lda, B_base_pointer, ldb, C_base_pointer, ldc});
+  insertCallCimGemm(m, n, k, A_base_pointer, lda, B_base_pointer, ldb,
+    C_base_pointer, ldc); 
   return true;
 }
 
@@ -678,6 +742,15 @@ void IslNodeBuilder::createMark(__isl_take isl_ast_node *Node) {
   if (strcmp(isl_id_get_name(Id), "gemm") == 0) {
     auto p = static_cast<Payload<MatMulInfoTyExtended> *>(isl_id_get_user(Id));
     if (insertCimGemm(p->patternTys[p->current])) {
+      p->current++;
+      isl_ast_node_free(Child);
+      isl_id_free(Id);
+      return;
+    }
+  }
+  if (strcmp(isl_id_get_name(Id), "gemv") == 0) {
+    auto p = static_cast<Payload<MatVecInfoTy> *>(isl_id_get_user(Id));
+    if (insertCimGemv(p->patternTys[p->current])) {
       p->current++;
       isl_ast_node_free(Child);
       isl_id_free(Id);

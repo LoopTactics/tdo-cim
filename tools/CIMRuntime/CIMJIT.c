@@ -11,7 +11,7 @@ void cim_allocate_shared_memory(float bytes) {
   dump_function(); printf("bytes: %f\n", bytes); 
 }
 void cim_gemm_int(
-int m, int n, int k, int *A, int lda, int *B, int ldb,  int *C, int ldc) { 
+  int m, int n, int k, int *A, int lda, int *B, int ldb,  int *C, int ldc) { 
 
   printf("%s\n", "param:");
   printf("%s%d\n", "m: ", m);
@@ -19,6 +19,17 @@ int m, int n, int k, int *A, int lda, int *B, int ldb,  int *C, int ldc) {
   printf("%s%d\n", "k: ", k);
     
   dump_function(); 
-  sleep(5); 
+  sleep(1); 
 
 } 
+
+void cim_gemv_int(
+  int m, int n, int *A, int lda, int *X, int inc_x, int *Y, int inc_y) {
+
+  printf("%s\n", "param:");
+  printf("%s%d\n", "m: ", m);
+  printf("%s%d\n", "n: ", n);
+
+  dump_function();
+  sleep(1);
+}
