@@ -2459,15 +2459,14 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s) {
       auto descr = BandDescriptor(gemm_body);
       return descr;
     };
-    builderGemm = (TileForCim)
-                      ? band(computeScheduleTile,
-                             mark(marker, band(computeSchedulePoint)))
-                      : mark(marker, band(originalSchedule));
+    builderGemm = (TileForCim) ? band(computeScheduleTile,
+                                      mark(marker, band(computeSchedulePoint)))
+                               : mark(marker, band(originalSchedule));
   }
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
 
-  //if (tac == Tactic::FUSION) {
+  // if (tac == Tactic::FUSION) {
   //  root = fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s)
   //             .get_root();
   //}
@@ -2846,9 +2845,9 @@ static isl::schedule isGemvLikeLate(isl::schedule schedule, const Scop &s) {
       auto descr = BandDescriptor(gemvBody);
       return descr;
     };
-    builderGemv = (TileForCim) ?
-        band(computeScheduleTile, mark(marker, band(computeSchedulePoint)))
-        : mark(marker, band(computeOriginalSchedule)); 
+    builderGemv = (TileForCim) ? band(computeScheduleTile,
+                                      mark(marker, band(computeSchedulePoint)))
+                               : mark(marker, band(computeOriginalSchedule));
   }
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemv, builderGemv);
