@@ -27,3 +27,41 @@ To use matchers/builders
 ``` 
 clang -O3 -mllvm -polly -mllvm -polly-enable-matchers-opt-early -mllvm -debug-only=polly-opt-isl -I utilities/ -I linear-algebra/kernels/gemm/ utilities/polybench.c linear-algebra/kernels/gemm/gemm.c  -o gemm -ldl -L/pathTo/llvm_build/lib -lCIMRuntime 
 ```
+
+
+How to install
+```
+export BASE=`pwd`
+export LLVM_SRC=${BASE}/llvm
+export POLLY_SRC=${LLVM_SRC}/tools/polly
+export CLANG_SRC=${LLVM_SRC}/tools/clang
+export LLVM_BUILD=${BASE}/llvm_build
+
+if [ -e /proc/cpuinfo ]; then
+    procs=`cat /proc/cpuinfo | grep processor | wc -l`
+else
+    procs=1
+fi
+
+if ! test -d ${LLVM_SRC}; then
+    git clone http://llvm.org/git/llvm.git ${LLVM_SRC}
+    git reset --hard ff8c1be17aa3ba7bacb1ef7dcdbecf05d5ab4eb7 
+fi
+
+if ! test -d ${POLLY_SRC}; then
+    git clone --branch=hayStackMatcher --single-branch git@git.ics.ele.tue.nl:mnemosene/llvm-polly.git ${POLLY_SRC}
+fi
+
+if ! test -d ${CLANG_SRC}; then
+    git clone http://llvm.org/git/clang.git ${CLANG_SRC}
+    git reset --hard 2e4c9c5fc864c2c432e4c262a67c42d824b265c6
+fi
+
+mkdir -p ${LLVM_BUILD}
+cd ${LLVM_BUILD}
+
+cmake3 ${LLVM_SRC}
+make -j$procs -l$procs
+make check-polly
+```
+
