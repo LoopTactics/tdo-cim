@@ -25,7 +25,7 @@ Ninja 1.8.2
 To use matchers/builders
 
 ``` 
-clang -O3 -mllvm -polly -mllvm -polly-enable-matchers-opt-early -mllvm -debug-only=polly-opt-isl -I utilities/ -I linear-algebra/kernels/gemm/ utilities/polybench.c linear-algebra/kernels/gemm/gemm.c  -o gemm -ldl -L/pathTo/llvm_build/lib -lCIMRuntime 
+clang -O3 -mllvm -polly -mllvm -polly-enable-matchers-opt-late -mllvm -polly-tile-for-cim -mllvm -debug-only=polly-opt-isl -I utilities/ -I linear-algebra/kernels/gemm/ utilities/polybench.c linear-algebra/kernels/gemm/gemm.c  -o gemm -ldl -L/pathTo/llvm_build/lib -lCIMRuntime 
 ```
 
 
@@ -60,7 +60,7 @@ fi
 mkdir -p ${LLVM_BUILD}
 cd ${LLVM_BUILD}
 
-cmake3 ${LLVM_SRC}
+cmake ${LLVM_SRC}
 make -j$procs -l$procs
 make check-polly
 ```
