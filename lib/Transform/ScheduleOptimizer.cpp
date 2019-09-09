@@ -140,6 +140,11 @@ static cl::opt<bool> FirstLevelTiling("polly-tiling",
                                       cl::init(true), cl::ZeroOrMore,
                                       cl::cat(PollyCategory));
 
+static cl::opt<bool> TileForCim("polly-tile-for-cim",
+                                cl::desc("Enable loop tiling for CIM device"),
+                                cl::init(false), cl::ZeroOrMore,
+                                cl::cat(PollyCategory));
+
 static cl::opt<int> LatencyVectorFma(
     "polly-target-latency-vector-fma",
     cl::desc("The minimal number of cycles between issuing two "
@@ -2312,8 +2317,7 @@ static isl::schedule_node addCimTearDown(isl::schedule_node node) {
 }
 
 // is the pattern gemm-like?
-isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s,
-                             const Tactic tac) {
+isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s) {
 
   isl::schedule_node root = schedule.get_root();
 
@@ -2455,7 +2459,7 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s,
       auto descr = BandDescriptor(gemm_body);
       return descr;
     };
-    builderGemm = (tac == Tactic::TILING)
+    builderGemm = (TileForCim)
                       ? band(computeScheduleTile,
                              mark(marker, band(computeSchedulePoint)))
                       : mark(marker, band(originalSchedule));
@@ -2463,10 +2467,10 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s,
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemm, builderGemm);
 
-  if (tac == Tactic::FUSION) {
-    root = fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s)
-               .get_root();
-  }
+  //if (tac == Tactic::FUSION) {
+  //  root = fuseTwoConsecutiveGemmIfNotTiled(root.root().get_schedule(), s)
+  //             .get_root();
+  //}
 
   // early exit if we did not detect any core gemm stmt.
   // if we did detect a gemm pattern we also look for
@@ -2838,8 +2842,13 @@ static isl::schedule isGemvLikeLate(isl::schedule schedule, const Scop &s) {
     auto marker = [&]() {
       return isl::id::alloc(s.getIslCtx(), "gemv", &pGemv);
     };
-    builderGemv =
-        band(computeScheduleTile, mark(marker, band(computeSchedulePoint)));
+    auto computeOriginalSchedule = [&]() {
+      auto descr = BandDescriptor(gemvBody);
+      return descr;
+    };
+    builderGemv = (TileForCim) ?
+        band(computeScheduleTile, mark(marker, band(computeSchedulePoint)))
+        : mark(marker, band(computeOriginalSchedule)); 
   }
 
   root = replaceDFSPreorderOnce(root.child(0), matcherGemv, builderGemv);
@@ -3118,10 +3127,9 @@ handleCimInitAndTearDown(isl::schedule schedule, const Scop &s,
 }
 
 static isl::schedule optimizeScheduleWithMatchersLate(isl::schedule schedule,
-                                                      const Scop &s,
-                                                      const Tactic &tac) {
+                                                      const Scop &s) {
 
-  schedule = isGemmLikeLate(schedule, s, tac);
+  schedule = isGemmLikeLate(schedule, s);
   if (lookUpScheduleTree(schedule, "gemm")) {
     // insert cim init and tear_down only if
     // we detect the gemm pattern. We also graft a subtree
@@ -3510,10 +3518,8 @@ bool IslScheduleOptimizer::runOnScop(Scop &S) {
 
   isl::schedule NewSchedule;
 
-  Tactic tac = Tactic::TILING;
-
   if (MatcherOptLate) {
-    NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S, tac);
+    NewSchedule = optimizeScheduleWithMatchersLate(Schedule, S);
   }
   if (MatcherOptEarly) {
     NewSchedule = optimizeScheduleWithMatchersEarly(S.getScheduleTree(), S);
