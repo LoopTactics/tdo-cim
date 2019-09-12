@@ -25,7 +25,7 @@ Ninja 1.8.2
 To use matchers/builders
 
 ``` 
-clang -O3 -mllvm -polly -mllvm -polly-enable-matchers-opt-late -mllvm -polly-tile-for-cim -mllvm -debug-only=polly-opt-isl -I utilities/ -I linear-algebra/kernels/gemm/ utilities/polybench.c linear-algebra/kernels/gemm/gemm.c  -o gemm -ldl -L/pathTo/llvm_build/lib -lCIMRuntime 
+clang -O3 -mllvm -polly -mllvm -polly-enable-matchers-opt-late -mllvm -polly-tile-for-cim -mllvm -debug-only=polly-opt-isl,polly-ast -I utilities/ -I linear-algebra/kernels/gemm/ utilities/polybench.c linear-algebra/kernels/gemm/gemm.c  -o gemm -ldl -L/pathTo/llvm_build/lib -lCIMRuntime 
 ```
 
 
@@ -45,7 +45,7 @@ fi
 
 if ! test -d ${LLVM_SRC}; then
     git clone http://llvm.org/git/llvm.git ${LLVM_SRC}
-    git reset --hard ff8c1be17aa3ba7bacb1ef7dcdbecf05d5ab4eb7 
+    git reset --hard origin/release_80 
 fi
 
 if ! test -d ${POLLY_SRC}; then
@@ -54,7 +54,7 @@ fi
 
 if ! test -d ${CLANG_SRC}; then
     git clone http://llvm.org/git/clang.git ${CLANG_SRC}
-    git reset --hard 2e4c9c5fc864c2c432e4c262a67c42d824b265c6
+    git reset --hard origin/release_80
 fi
 
 mkdir -p ${LLVM_BUILD}
