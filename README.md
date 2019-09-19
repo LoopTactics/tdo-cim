@@ -45,7 +45,7 @@ fi
 
 if ! test -d ${LLVM_SRC}; then
     git clone http://llvm.org/git/llvm.git ${LLVM_SRC}
-    git reset --hard origin/release_80 
+    (cd ${LLVM_SRC} && git reset --hard origin/release_80)
 fi
 
 if ! test -d ${POLLY_SRC}; then
@@ -54,7 +54,7 @@ fi
 
 if ! test -d ${CLANG_SRC}; then
     git clone http://llvm.org/git/clang.git ${CLANG_SRC}
-    git reset --hard origin/release_80
+    (cd ${CLANG_SRC} && git reset --hard origin/release_80)
 fi
 
 mkdir -p ${LLVM_BUILD}
