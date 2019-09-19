@@ -37,6 +37,8 @@ export POLLY_SRC=${LLVM_SRC}/tools/polly
 export CLANG_SRC=${LLVM_SRC}/tools/clang
 export LLVM_BUILD=${BASE}/llvm_build
 
+set -e
+
 if [ -e /proc/cpuinfo ]; then
     procs=`cat /proc/cpuinfo | grep processor | wc -l`
 else
