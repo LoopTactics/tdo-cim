@@ -44,8 +44,7 @@ else
 fi
 
 if ! test -d ${LLVM_SRC}; then
-    git clone http://llvm.org/git/llvm.git ${LLVM_SRC}
-    git reset --hard origin/release_80 
+    git clone http://llvm.org/git/llvm.git ${LLVM_SRC} 
 fi
 
 if ! test -d ${POLLY_SRC}; then
@@ -54,7 +53,6 @@ fi
 
 if ! test -d ${CLANG_SRC}; then
     git clone http://llvm.org/git/clang.git ${CLANG_SRC}
-    git reset --hard origin/release_80
 fi
 
 mkdir -p ${LLVM_BUILD}
@@ -64,4 +62,11 @@ cmake ${LLVM_SRC}
 make -j$procs -l$procs
 make check-polly
 ```
+
+Reset LLVM/CLang to release80
+
+```
+git reset --hard origin/release_80
+```
+
 
