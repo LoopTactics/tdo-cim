@@ -320,7 +320,7 @@ STATISTIC(PrevectOpts, "Number of strip-mining for prevectorization applied");
 STATISTIC(MatMulOpts,
           "Number of matrix multiplication patterns detected and optimized");
 
-constexpr int TILE_FACTOR_CIM_DEVICE = 256;
+constexpr int TILE_FACTOR_CIM_DEVICE = 512;
 
 /// Create an isl::union_set, which describes the isolate option based on
 /// IsolateDomain.
@@ -2316,6 +2316,16 @@ static isl::schedule_node addCimTearDown(isl::schedule_node node) {
   return node;
 }
 
+static isl::multi_union_pw_aff swapDims(isl::multi_union_pw_aff ps,
+  int firstDim, int secondDim) {
+
+  auto scheduleFirstDim = ps.get_union_pw_aff(firstDim);
+  auto scheduleSecondDim = ps.get_union_pw_aff(secondDim);
+  ps = ps.set_union_pw_aff(secondDim, scheduleFirstDim);
+  ps = ps.set_union_pw_aff(firstDim, scheduleSecondDim);
+  return ps;
+}
+
 // is the pattern gemm-like?
 isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s) {
 
@@ -2443,7 +2453,8 @@ isl::schedule isGemmLikeLate(isl::schedule schedule, const Scop &s) {
     auto computeScheduleTile = [&]() {
       auto descr = BandDescriptor(gemm_body);
       auto tiled_schedule = tile_node(gemm_body, TILE_FACTOR_CIM_DEVICE);
-      descr.partialSchedule = tiled_schedule.first;
+      descr.partialSchedule = swapDims(tiled_schedule.first, 0, 2);
+      descr.astOptions = isl::union_set(s.getIslCtx(), "{unroll[x]}");
       return descr;
     };
     auto computeSchedulePoint = [&]() {
