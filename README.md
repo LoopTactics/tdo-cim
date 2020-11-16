@@ -51,7 +51,7 @@ if ! test -d ${LLVM_SRC}; then
 fi
 
 if ! test -d ${POLLY_SRC}; then
-    git clone --branch=master --single-branch git@git.ics.ele.tue.nl:mnemosene/llvm-polly.git ${POLLY_SRC}
+    git clone --branch=master --single-branch https://github.com/LoopTactics/tdo-cim.git llvm-polly ${POLLY_SRC}
 fi
 
 if ! test -d ${CLANG_SRC}; then
